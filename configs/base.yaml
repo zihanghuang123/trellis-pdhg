@@ -59,7 +59,7 @@ solver:
   compile: {aot: true, cache_dir: ~/.cache/trellis_jax, fail_on_late_compile: true}
   dtype: float64
   qp_block: auto                 # exact_ipm for kappa=1, split_rows for kappa>=2
-  psd_proj: auto                 # auto | eigh | polar_ns | qdwh | jacobi | lowrank: batched method chosen from --bench_primitives (8.2)
+  psd_proj: auto                 # auto | eigh | lowrank | polar_ns: eigh at kappa 1, lowrank (polar_ns fallback) above (8.2)
   ipm: {iters: 40, tol: 1.0e-11}
   restarts: {scheme: pdlp_kkt, beta_sufficient: 0.2, beta_necessary: 0.8}
   checkpoint_every: 2000
@@ -130,22 +130,21 @@ selftest:
 # M0 benchmarks (plan 8.2 and section 0: every round primitive must truly batch).
 bench:
   peak_tflops_fp64: 19.5         # A100 FP64 tensor-core peak: the roofline for the batching verdicts
-  eigh: [[16, 2600], [16, 80000], [136, 2600], [136, 20000], [816, 64], [816, 256]]   # [size, batch]
+  edges_per_round: 2600          # matrices per round at N = 32 (one per edge), for the per-round summary
+  eigh: [[16, 2600], [16, 80000], [136, 2600], [136, 20000], [816, 64], [816, 256]]   # --bench_eigh: [size, batch]
   eigh_repeats: 5
-  primitives:
+  psd:                           # --bench_psd: exact eigh vs low-rank tracking at the order-1, -2, -3 sizes
     repeats: 5
-    # PSD projection candidates at the order-2 and order-3 moment-matrix sizes: [size, [batches]]
-    psd: [[136, [650, 2600]], [816, [64, 256]]]
-    psd_rank: [1, 4]             # positive eigenvalues per test matrix (moment matrices approach low rank)
-    psd_perturbation: 1.0e-3     # change between "rounds", for the warm-started candidates
-    ns_iters: [10, 20, 40]
-    jacobi_cold_sweeps: [6]
-    jacobi_cold_max_n: 136
-    jacobi_warm_sweeps: [1, 2]
-    jacobi_max_elements: 5.0e7   # batch * n^2 cap: Jacobi is memory-bound, larger cases are skipped
-    lowrank: {p: 8, steps: [1, 2]}
-    # Cholesky + triangular solves: the IPM normal equations (B ~30, A 136) and the tree pivots (A 560, B 960, A-reg 4480)
-    cholesky: [[16, [2600, 10400]], [30, [2600, 10400]], [136, [2600, 10400]], [560, [16, 64]], [960, [16, 64]], [4480, [4, 16]]]
+    sizes: [[16, [650, 2600]], [136, [650, 2600]], [816, [256, 1024]]]   # [n, [batches]]
+    rank: 4                      # positive eigenvalues per matrix (moment matrices approach low rank)
+    gap: 0.01                    # negative eigenvalues lie in [-2, -gap], so the exact answer has exactly `rank` positives
+    perturbation: 1.0e-3         # change between rounds; the warm basis comes from the matrix before it
+    lowrank_p: [8, 16]           # tracked basis size, capped at n/2
+    eigh_max_elements: 2.0e8     # batch * n^2 above which eigh is not timed (it runs matrix by matrix)
+  linalg:                        # --bench_linalg, before M3
+    repeats: 5
+    # Cholesky + triangular solves: the IPM normal equations (B ~30, A 136) and the tree pivots (A 560, B 960)
+    cholesky: [[30, [2600, 10400]], [136, [2600, 10400]], [560, [16, 64]], [960, [16, 64]]]
     merge_eigh: [[32, [16, 64]], [128, [16, 64]]]                  # low-rank tree merge, k = 2r for r = 16, 64
-    merge_qr: [[1120, 32, [16, 64]], [1120, 128, [16, 64]]]        # [rows, cols, [batches]]
+    merge_orth: [[1120, 32, [16, 64]], [1120, 128, [16, 64]]]      # [rows, cols, [batches]]: QR vs Gram-matrix orthonormalization
     coupling: {q: 28, edges: [2600, 26000]}

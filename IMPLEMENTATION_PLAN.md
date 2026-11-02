@@ -1,8 +1,8 @@
 # Implementation Plan — Certified Trellis Trajectory Optimization, Planar Pushing Prototype
 
 **For:** Claude Code, on a server with 8× A100 SXM 80 GB.
-**Source of truth:** the proposal PDF *Certified Trajectory Optimization on Time-Layered Graphs* (Nov 2, 2026), Sections 2–8 and 12. Put it in the repo at `docs/trajopt_proposal.pdf`.
-**Rule:** where this plan and the proposal disagree, the proposal wins, except for the explicit deviations listed in §19.
+**Source of truth:** `docs/trajopt_detailed.tex`, *Certified Trajectory Optimization on Time-Layered Graphs*, technical version (Nov 3, 2026), Sections 2–8 and 12. It supersedes the short proposal `docs/trajopt_proposal.pdf`. Its sections follow the same numbering, so "proposal §n" below refers to the tex.
+**Rule:** where this plan and the tex disagree, the tex wins, except for the explicit deviations listed in §19.
 **Not in scope now:** the local solver (LEAP). Extraction writes guesses to disk in a format LEAP can read later (§13.4).
 
 ---
@@ -84,8 +84,10 @@ The table lists every configuration. **They are run in stages, starting with a l
 ## 2. Repository layout
 
 ```
-trellis_push/
-  docs/trajopt_proposal.pdf
+trellis-pdhg/                 # repo root; every script lives here
+  docs/trajopt_detailed.tex   # source of truth
+  docs/trajopt_proposal.pdf   # short draft, superseded
+  setup.sh                    # creates the `trellis` conda environment (§3)
   configs/
     base.yaml                 # all defaults (§16)
     runs/A.yaml  A_k2.yaml  A_k3_small.yaml  A_small.yaml  A_k2_small.yaml  A_reg.yaml  B.yaml
@@ -108,11 +110,12 @@ Shared helpers (YAML loading, index maps) can be duplicated between scripts. A l
 
 ## 3. Environment
 
-- Python 3.11+, `jax[cuda12]` (recent stable), `numpy`, `scipy`, `pyyaml`, `matplotlib`, `ffmpeg` (system), `cvxpy`, `clarabel`, `scs`. Add `mosek` if a license exists; it is optional and used only for reference checks.
+- `bash setup.sh` creates a dedicated conda environment, `trellis` (no DiffMJX), and prints the installed versions. Everything runs on the server.
+- Python 3.11+, `jax[cuda12]` (recent stable), `numpy`, `scipy`, `pyyaml`, `matplotlib`, `ffmpeg` (conda-forge), `cvxpy`, `clarabel`, `scs`. Add `mosek` if a license exists; it is optional and used only for reference checks.
 - `jax.config.update("jax_enable_x64", True)` in every script. Bounds must be computed in float64. The iteration dtype is a config flag (`solver.dtype`, default `float64`).
 - Environment for each process: `XLA_PYTHON_CLIENT_PREALLOCATE=false`, `XLA_PYTHON_CLIENT_MEM_FRACTION=<1/procs_per_gpu - margin>`.
 - If available, enable CUDA MPS on each GPU so several small processes can share it efficiently (§15.3).
-- **Persistent compilation cache**, shared by all jobs on the server: `jax.config.update("jax_compilation_cache_dir", <shared dir>)` and `jax_persistent_cache_min_compile_time_secs = 0`. Jobs with the same shapes then reuse compiled code instead of each paying the slow first compile.
+- **Persistent compilation cache**, shared by all jobs on the server: `jax.config.update("jax_compilation_cache_dir", <shared dir>)` (`solver.compile.cache_dir`, default `~/.cache/trellis_jax`) and `jax_persistent_cache_min_compile_time_secs = 0`. Jobs with the same shapes then reuse compiled code instead of each paying the slow first compile.
 - Record the JAX, jaxlib, CUDA and driver versions and the XLA flags in `timing.json`.
 
 ---
@@ -417,7 +420,8 @@ $$
 \mathrm{LB}_e = g_0 + b_{\text{eq}}^\top\nu + b_{\text{in}}^\top\mu - \langle \hat\Lambda, \mathcal B_0\rangle + \sum_i \min(r_i\underline m_i, r_i \overline m_i),\quad r = g_{\setminus0} - A_{\text{eq}}^\top\nu - A_{\text{in}}^\top\mu - \mathcal B^*_{\setminus0}(\hat\Lambda),
 $$
   with $\hat\Lambda = \Pi_{\succeq0}(-\Lambda_e)$ under the §7.2 convention. Reason: for $\Gamma\succeq0$ and $\mathcal B(m)\succeq0$, $\langle\Gamma,\mathcal B(m)\rangle\ge0$, so $g^\top m \ge (g - \mathcal B^*\Gamma)^\top m$. Every multiplier is projected onto its dual cone, so the bound is valid for **any** stored values. Unit test: it never exceeds Clarabel's $\pi_e$.
-- Then $L = \mathrm{SP}[\mathrm{LB}_e] - \delta\sum_v \|\lambda_v\|_1$ (ℓ∞ tolerance, so the dual norm is ℓ1).
+- Then $L = \mathrm{SP}[\mathrm{LB}_e] - \delta\sum_v \|\lambda_v\|_1$ (ℓ∞ tolerance, so the dual norm is ℓ1). This is $L_\delta$ of the tex.
+- **Also keep $L_0 = \mathrm{SP}[\mathrm{LB}_e]$**, the same shortest path without the δ term (tex Thm 5.1, Remark 5.2). $L_\delta \le J_{P_\delta}$, and it is the bound of the stopping test (§10.5). $L_0 \le J^\star$ and $L_0 \ge L_\delta$, so it is the bound reported for $J^\star$ and, once LEAP exists, for the trajectory gap $U_{\text{traj}} - L_0$. Both come from one shortest path; keep the running maximum of each.
 - **Shortest path:** a DP over layers with `jax.ops.segment_min` over incoming edges. That is O(E) work with $N$ sequential steps. A min-plus `associative_scan` gives $\log N$ depth, but is optional.
 
 ### 10.2 Exact bound and lazy evaluation (`exact_every`, default 200 rounds)
@@ -448,7 +452,7 @@ On small instances only: solve the full relaxation with CVXPY to get $J_{\text{r
 - **When:** at every scan-block boundary (every 50 rounds), where the host already synchronizes.
 - **What the tolerances affect.** They change only when the run stops. $L$ stays rigorous whatever they are.
 - **Status** goes to `cert.json`: `converged_eta`, `round_cap`, `time_cap` or `stalled`. Only `converged_eta` counts as reaching η in comparisons; the others are reported with their final gap.
-- **Not used for stopping:** the true-model cost of an extracted guess (§13.4). It is not a feasible trajectory. The trajectory gap $U_{\text{traj}} - L$ is computed only once LEAP exists.
+- **Not used for stopping:** the true-model cost of an extracted guess (§13.4). It is not a feasible trajectory. The trajectory gap $U_{\text{traj}} - L_0$ is computed only once LEAP exists.
 
 ---
 
@@ -678,7 +682,7 @@ $$P = \begin{bmatrix}T^{-1} & -K^\top\\ -K & \Sigma^{-1}\end{bmatrix}.$$
 ### 12.2 Logging (`log.jsonl`, one line per scan block)
 - round, wall time, time per phase (edges, eigh, duals, tree, certificate);
 - primal and dual residuals, normalized KKT error, objective;
-- $L_{\text{free}}$, and when available $L_{\text{lazy}}$, $L_{\text{full}}$, $L_{\text{bnb}}$;
+- $L_{\text{free}}$, and when available $L_{\text{lazy}}$, $L_{\text{full}}$, $L_{\text{bnb}}$, each as both $L_\delta$ and $L_0$ (§10.1);
 - $U_{\text{flow}}$ of both candidates, their four feasibility violations, the gap $(U_{\text{flow}} - L_{\text{best}})/\max(1,|L_{\text{best}}|)$, and the stop status;
 - all counters (§9.4, §11.6), lazy evaluation count, restart events.
 
@@ -814,7 +818,7 @@ model:
   pusher: {radius: 0.01, mu_contact: 0.5, v_max_step: 0.02}
   limit_surface: {c_v: 0.5}          # speed scale
   workspace: {p_box: [[-0.6, 0.6], [-0.6, 0.6]], r_ws: 0.4}
-  force: {fn_max: 5.0}
+  force: {fn_max: 0.5}
   step: {theta_step_max_deg: 15}
 trellis:
   N: 32
@@ -842,7 +846,7 @@ solver:
   tune: {grid: [0.003, 0.01, 0.03, 0.1, 0.3, 1.0], rounds: 2000, score: kkt}
   delta: 1.0e-4             # state tolerance of P_delta
   stop: {eta_rel: 1.0e-3, eps_flow: 1.0e-6, eps_psd: 1.0e-8, eps_row: 1.0e-8}   # 10.5
-  compile: {aot: true, cache_dir: /shared/jax_cache, fail_on_late_compile: true}
+  compile: {aot: true, cache_dir: ~/.cache/trellis_jax, fail_on_late_compile: true}
   dtype: float64
   qp_block: auto            # exact_ipm for kappa=1, split_rows for kappa>=2
   ipm: {iters: 40, tol: 1.0e-11}
@@ -896,6 +900,8 @@ render: {fps: 10, filmstrip_cols: 8}
 output: {root: runs}
 ```
 
+`configs/base.yaml` is the authoritative copy. It also holds the tasks (§4.7), the pusher's start, mode subsets (`trellis.faces`, `trellis.regions`), the build-time pruning tolerances (`pruning`), the tiny self-test instance (`selftest`) and the benchmark sizes (`bench`).
+
 **Per-run overrides** (`configs/runs/*.yaml`):
 - A: none.
 - A-κ2: `relaxation.order: 2`.
@@ -923,7 +929,7 @@ Seed 0 only.
 
 | # | Milestone | Acceptance checks (all automated in `--selftest` or in a dedicated `--check_<name>` mode) |
 |---|---|---|
-| M0 | Model and graph | Sign conventions unit-tested. Mode graph matches §4.4. Pruning removes only infeasible or unreachable edges. A hand-scripted feasible push (forward-simulated with the true model) is a valid start→goal path; record its cost $J_{\text{hand}}$. Benchmarks recorded: batched `eigh` sizes (§8.2), per-round time vs E, kernels and syncs per round (§15.5). Ahead-of-time compile covers every variant; a timing-mode dry run reports zero late compiles. |
+| M0 | Model and graph | Sign conventions unit-tested. Mode graph matches §4.4. Pruning removes only infeasible or unreachable edges. A hand-scripted feasible push (forward-simulated with the true model) is a valid start→goal path; record its cost $J_{\text{hand}}$. Benchmarks recorded: batched `eigh` sizes (§8.2), per-round time vs E, kernels and syncs per round (§15.5). Ahead-of-time compile covers every variant; a timing-mode dry run reports zero late compiles. *(The per-round measurements and the dry run need the PDHG round, so they are recorded at M3; M0 records the `eigh` benchmark.)* |
 | M1 | Outer models | §5.4 validity: 0 violations over $10^4$ samples per edge type (SDP κ = 1, 2; Taylor). Band report printed. |
 | M2 | Reference solve | CVXPY + Clarabel (or MOSEK) solves the full relaxation on the small instance and gives $J_{\text{rel}}$. $J_{\text{rel}} \le J_{\text{hand}}$. |
 | M3 | PDHG, run D | On the small instance, the objective reaches within 1e-4 relative of $J_{\text{rel}}$. Every logged $L$ is ≤ $J_{\text{rel}}$ (+ eps). Restarts fire and reduce the KKT error. Stopping test (§10.5): when it fires, $L_{\text{best}} \le J_{\text{rel}} \le U_{\text{flow}}$ within tolerance and the gap is ≤ η. |
@@ -980,7 +986,7 @@ $$
 \pi_e(g) \ge g_0 + b_{\text{eq}}^\top\nu + b_{\text{in}}^\top\mu - \langle\Lambda,\mathcal B_0\rangle + \sum_i \min(r_i\underline m_i, r_i\overline m_i),\qquad r = g_{\setminus0} - A_{\text{eq}}^\top\nu - A_{\text{in}}^\top\mu - \mathcal B^*_{\setminus0}(\Lambda).
 $$
 - **Bound degradation** with fixed duals: $\mathrm{LB}(g') \ge \mathrm{LB}(g) - |g'_0 - g_0| - \sum_i |g'_i - g_i|\max(|\underline m_i|, |\overline m_i|)$.
-- **Certificate:** $L(\lambda) = \mathrm{SP}[\mathrm{LB}_e(g^{\text{cert}}_e(\lambda))] - \delta\sum_v\|\lambda_v\|_1 \le J^\star$.
+- **Certificate:** $L_0(\lambda) = \mathrm{SP}[\mathrm{LB}_e(g^{\text{cert}}_e(\lambda))] \le J^\star$ and $L_\delta(\lambda) = L_0(\lambda) - \delta\sum_v\|\lambda_v\|_1 \le J_{P_\delta}$.
 - **Cyclic reduction:** see §11.2.
 - **Woodbury:** $A_{mm}^{-1} = R_{mm}^{-1} - GC^{-1}G^\top$, see §11.3.
 - **Edge Jacobian (frozen active set):** $J^{\text{full}} = H^{-1} - H^{-1}E^\top(EH^{-1}E^\top)^+EH^{-1}$, see §11.1.

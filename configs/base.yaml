@@ -1,0 +1,132 @@
+# All defaults (IMPLEMENTATION_PLAN.md section 16). A run file in configs/runs/ overrides keys,
+# and `--set a.b=value` overrides single keys on the command line.
+# Units are SI (m, s, N, rad) unless a key says otherwise (_deg).
+run_name: A_exact_sdp_k1
+seed: 0
+task: T3_translate_rotate
+
+# Tasks (plan 4.7): slider pose (x, y, theta) at the start and at the goal.
+tasks:
+  T1_push_straight:    {start: [0.0, 0.0, 0.0], goal: [0.30, 0.0, 0.0]}
+  T2_rotate_90:        {start: [0.0, 0.0, 0.0], goal: [0.0, 0.0, 1.5707963267948966]}
+  T3_translate_rotate: {start: [0.0, 0.0, 0.0], goal: [0.20, 0.15, 1.5707963267948966]}
+  T4_rotate_180:       {start: [0.0, 0.0, 0.0], goal: [0.10, 0.0, 3.141592653589793]}
+# The pusher starts in the strip behind face 2 (-x). Its position is in the slider body frame.
+task_common:
+  pusher_start: [-0.125, 0.0]
+  start_region: strip_2
+
+model:
+  gravity: 9.81
+  slider: {half_x: 0.10, half_y: 0.075, mass: 0.1, mu_table: 0.5}
+  pusher: {radius: 0.01, mu_contact: 0.5, v_max_step: 0.02}
+  limit_surface: {c_v: 0.5, rbar_grid: 1000}   # c_v sets the speed scale; rbar on an n x n grid
+  workspace: {p_box: [[-0.6, 0.6], [-0.6, 0.6]], r_ws: 0.4}
+  force: {fn_max: 0.5}
+  step: {theta_step_max_deg: 15}
+
+trellis:
+  N: 32
+  dt: 0.1
+  contact_types: [stick, slide_pos, slide_neg]
+  noncontact_regions: 8
+  faces: [0, 1, 2, 3]            # subsets give the reduced instances (plan 12.3; A-k3 fallback)
+  regions: all                   # all, or a list of strip_j / corner_j names
+
+costs: {w_p: 1.0, w_theta: 0.5, w_r: 1.0, w_f: 0.01, w_switch: 0.05}
+
+relaxation:
+  type: sdp                      # sdp | taylor
+  order: 1                       # kappa
+  couple_second_moments: true
+  rlt: false
+  regions: {theta_splits: 1, lambda_splits: 1}
+  taylor_mode: band              # band | mccormick   (B only)
+  cost_model: tangent_planes     # tangent_planes | soc (B only)
+  cost_planes: 16
+
+solver:
+  rounds_max: 50000              # safety stop only
+  time_budget_s: 1800            # safety stop only
+  stall_rounds: 2000             # safety stop: no L_best / U_flow progress > 1e-6 rel
+  rounds_per_scan: 50
+  theta_pd: auto                 # per-config tuning (7.3): runs/tuned/<config>_<task>.yaml
+  theta_psd: same                # same | <float>
+  primal_weight_update: none     # none | pdlp
+  tune: {grid: [0.003, 0.01, 0.03, 0.1, 0.3, 1.0], rounds: 2000, score: kkt}
+  delta: 1.0e-4                  # state tolerance of P_delta
+  stop: {eta_rel: 1.0e-3, eps_flow: 1.0e-6, eps_psd: 1.0e-8, eps_row: 1.0e-8}   # 10.5
+  compile: {aot: true, cache_dir: ~/.cache/trellis_jax, fail_on_late_compile: true}
+  dtype: float64
+  qp_block: auto                 # exact_ipm for kappa=1, split_rows for kappa>=2
+  ipm: {iters: 40, tol: 1.0e-11}
+  restarts: {scheme: pdlp_kkt, beta_sufficient: 0.2, beta_necessary: 0.8}
+  checkpoint_every: 2000
+
+skipping:
+  zero_test: true
+  lb_tol: 1.0e-12
+  face_cache: false              # true for B
+  gershgorin_skip: true
+  compaction: bucketed           # none | bucketed  (15.5: measure both)
+
+tree:
+  type: exact                    # none | exact | lowrank_a | lowrank_b
+  every: 10
+  reg: 1.0e-8
+  rank: 16
+  jacobian: one_step             # one_step | frozen_rank (11.1)
+  eig_tol: 1.0e-8                # frozen_rank only
+  primal_predict: false          # exact / C-a only
+  lowrank_a: {oversample: 8}
+  reference: {model: pos_vel, channels_per_coord: 2, gamma_v: 1.0, w_c: 1.0, w_a: 1.0}   # C-b, 12.2
+  secant_history: auto           # max(8, rank)
+  secant_sources: [trials, probes]   # add 'rounds' to also use ordinary-round differences
+  probe_solves_per_refresh: 0
+  probe_scale: 1.0e-2
+  safeguard:
+    type: supermann              # supermann | hpe
+    c0: 0.0                      # 0 disables blind K0 steps (12.4: check the actual update)
+    c1: 0.99
+    q: 0.99
+    sigma: 0.1
+    relax: 1.0
+    beta: 0.5
+    max_trials: 3
+    hpe: {sigma: 0.9, lambda_min: 0.1}
+
+certificate:
+  free_every: 1                  # rounds
+  exact_every: 200
+  full_exact_every: 1000
+  lazy: true
+  bnb: {enabled: true, every: 500, max_splits: 8}
+  eps_cert: 1.0e-12
+  cert_workers: 32
+  reference_check_small: true
+
+extraction:
+  every: 1000
+  methods: [flow_decomp, random_round, cert_kshortest, greedy]
+  k_paths: 8
+  samples: 256
+
+render: {fps: 10, filmstrip_cols: 8}
+output: {root: runs}
+
+# Build-time pruning (plan 6.1): per-edge-type LPs over the linear rows of the true model.
+pruning:
+  box_margin: 1.0e-7             # relative outward pad on LP-tightened variable boxes
+  infeasible_margin: 1.0e-7      # selftest: a pruned type must miss feasibility by more than this
+
+# The tiny self-test instance (plan 12.3): N = 8, 2 faces, 4 regions.
+selftest:
+  N: 8
+  task: T1_push_straight
+  faces: [0, 2]
+  regions: [strip_0, strip_2, corner_1, corner_2]
+
+# M0 benchmark of batched eigh (plan 8.2): [matrix size, batch].
+bench:
+  eigh: [[16, 2600], [16, 80000], [136, 2600], [136, 20000], [816, 64], [816, 256]]
+  eigh_repeats: 5

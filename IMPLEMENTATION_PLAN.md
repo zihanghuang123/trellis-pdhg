@@ -13,6 +13,10 @@
 - **Settings live in YAML.** No magic constants buried in code. Every knob in §16 is read from the config.
 - **Build in milestones (§17).** Each milestone has acceptance checks, and each check is a small function inside the relevant script, run with `--selftest`. Do not start a milestone until the previous one passes.
 - **Parallelize everything (§15).** Within a run, every per-edge and per-vertex operation is batched with `jax.vmap` or segment ops; Python loops over edges are forbidden. Across runs, all 8 GPUs work in parallel.
+- **Batching is an acceptance criterion, not a style.** Speed from batching is the point of the method (§1 target). Calling `vmap` is not enough: a library kernel can still solve the batch one item at a time (M0 found exactly this for `eigh` above 32×32). So every GPU primitive used in a round is benchmarked at its real batch sizes (`run_trajopt.py --bench_primitives`), next to its FLOP roofline.
+  - Its per-item time must fall as the batch grows, or it must reach a fair share (≥ 20 %) of the roofline.
+  - A primitive that fails is replaced before the milestone that uses it, with hand-written batched JAX if needed, even when that means more code.
+  - Where even a perfectly batched primitive is too slow, reduce the work: exploit low rank, warm starts and skipping.
 - **Count everything.** Every solve, cache hit, zero-test pass, eigendecomposition, derivative evaluation, tree attempt and fallback is counted and logged. The comparisons depend on these counts.
 
 ---
@@ -20,6 +24,8 @@
 ## 1. Goal and run matrix
 
 **Goal.** For planar pushing, build the relaxation and PDHG solver from the proposal. Compute the certified lower bound $L$. Extract initial guesses four ways, render them, and compare four solver variants.
+
+**Speed target.** A cold-start solve to the η stop (§10.5) within seconds of wall time on one GPU for κ = 1, and ideally for κ = 2. Two levers get there: fully batched rounds (§0, §15.1) and fewer rounds (trees, restarts). The 30-minute `time_budget_s` is a safety stop, not an expectation.
 
 | Run | Segment tree | Edge relaxation | Key knobs | Proposal § |
 |---|---|---|---|---|
@@ -368,9 +374,14 @@ Store the PSD maps as sparse `(row, col, moment_index, coefficient)` lists for e
 - **Gershgorin skip** (exact, optional, default on): if every Gershgorin disc of the argument lies in $(-\infty, 0]$, the projection is exactly 0, so skip the eigendecomposition. Count these.
 - Keep the eigenvectors of the latest projection. The optional frozen-rank Jacobian (§11.1) uses them.
 - **Benchmark batched `eigh` first** (milestone M0): 16×16 (κ = 1), 136×136 (κ = 2), 816×816 (κ = 3), at realistic batch sizes. Some GPU `eigh` paths loop over large matrices instead of batching them.
-  - If 136×136 is slow, add `psd_proj: polar_ns`: $\Pi(X) = (X + |X|)/2$, with $|X| = X\,\mathrm{sign}(X)$ computed by batched Newton–Schulz iterations (matmuls only, FP64 tensor cores).
-  - Accept its result only after checking the projection error, $\|X_+ X_-\|_F$ and $\lambda_{\min}(X_+)$, against `psd_proj_tol`. The PDHG then runs inexactly to tolerance (Rasch & Chambolle); log the errors.
-  - The optional frozen-rank Jacobian always uses `eigh`.
+- **M0 result.** `eigh` batches at 16×16: 0.6 ms for 2,600 matrices. At 136×136 it runs matrix by matrix: about 45 µs each, flat with the batch, about 3 % of the FP64 roofline, so 122 ms per round for 2,600 edges. cuSOLVER's batched Jacobi stops at 32×32. So κ ≥ 2 does not use `eigh`; `solver.psd_proj` selects a batched method, chosen by `--bench_primitives`:
+  - `polar_ns`: $\Pi(X) = (X + |X|)/2$, with $|X| = X\,\mathrm{sign}(X)$ computed by batched Newton–Schulz iterations (matmuls only, FP64 tensor cores).
+  - `qdwh`: $|X|$ from the QDWH polar decomposition (`jax.scipy.linalg.polar`), if its QR/Cholesky steps batch.
+  - `jacobi`: a batched parallel-cyclic Jacobi eigensolver in JAX (all matrices and all n/2 disjoint rotations per round at once). It can be warm-started from the previous round's eigenvectors, and it gives eigenvectors for the frozen-rank Jacobian.
+  - `lowrank`: track the positive eigenspace from the previous round's basis by block-Krylov Rayleigh–Ritz on span$[Q, XQ]$, at O(n²p) per matrix instead of O(n³). Moment matrices approach low rank as the relaxation converges. A failed accuracy check falls back to a full batched method for that matrix only (compaction, §9.3).
+  - Even a perfectly batched full eigendecomposition costs about 60 GFLOP per κ = 2 round (≥ 3 ms at peak), so the seconds target at κ = 2 relies on warm starts and low rank, not on batching alone.
+- Accept an inexact projection only after checking the projection error, $\|X_+ X_-\|_F$ and $\lambda_{\min}(X_+)$, against `psd_proj_tol`. The PDHG then runs inexactly to tolerance (Rasch & Chambolle); log the errors. The certificate stays valid either way: it holds for any duals (§10.1).
+- The optional frozen-rank Jacobian needs eigenvectors: `eigh` at κ = 1, the batched Jacobi above κ = 1.
 
 ### 8.3 κ ≥ 2: split the equalities too (deviation, §19)
 - For κ ≥ 2 the polyhedral block has thousands of variables, which is too large for a dense IPM on each edge.
@@ -756,6 +767,7 @@ A run directory (final state, or a chosen snapshot), plus `--methods all|<list>`
 
 ### 15.1 Within one run (one GPU)
 - All per-edge work is batched with `vmap` over shape buckets: QP block IPM, pricing LPs, eigendecompositions, the zero test, the cache check, $J_e$, extraction sampling.
+- **No primitive may loop over the batch internally** (§0). This includes library kernels behind `vmap`: Cholesky and triangular solves (IPM, tree pivots), eigendecompositions, QR. Each is cleared by `--bench_primitives` at the sizes this run uses.
 - Vertex coupling uses `segment_sum` and gathers. No Python loops over edges or vertices.
 - Rounds run in `lax.scan` blocks (§7.5).
 - Bucketed compaction (§9.3) turns skipping into real GPU time savings.
@@ -849,6 +861,7 @@ solver:
   compile: {aot: true, cache_dir: ~/.cache/trellis_jax, fail_on_late_compile: true}
   dtype: float64
   qp_block: auto            # exact_ipm for kappa=1, split_rows for kappa>=2
+  psd_proj: auto            # auto | eigh | polar_ns | qdwh | jacobi | lowrank (8.2)
   ipm: {iters: 40, tol: 1.0e-11}
   restarts: {scheme: pdlp_kkt, beta_sufficient: 0.2, beta_necessary: 0.8}
   checkpoint_every: 2000
@@ -929,7 +942,7 @@ Seed 0 only.
 
 | # | Milestone | Acceptance checks (all automated in `--selftest` or in a dedicated `--check_<name>` mode) |
 |---|---|---|
-| M0 | Model and graph | Sign conventions unit-tested. Mode graph matches §4.4. Pruning removes only infeasible or unreachable edges. A hand-scripted feasible push (forward-simulated with the true model) is a valid start→goal path; record its cost $J_{\text{hand}}$. Benchmarks recorded: batched `eigh` sizes (§8.2), per-round time vs E, kernels and syncs per round (§15.5). Ahead-of-time compile covers every variant; a timing-mode dry run reports zero late compiles. *(The per-round measurements and the dry run need the PDHG round, so they are recorded at M3; M0 records the `eigh` benchmark.)* |
+| M0 | Model and graph | Sign conventions unit-tested. Mode graph matches §4.4. Pruning removes only infeasible or unreachable edges. A hand-scripted feasible push (forward-simulated with the true model) is a valid start→goal path; record its cost $J_{\text{hand}}$. Benchmarks recorded: batched `eigh` sizes (§8.2), per-round time vs E, kernels and syncs per round (§15.5). Ahead-of-time compile covers every variant; a timing-mode dry run reports zero late compiles. *(The per-round measurements and the dry run need the PDHG round, so they are recorded at M3; M0 records the `eigh` benchmark.)* **Batching (§0):** `--bench_primitives` times every round primitive at two batch sizes against its roofline and prints a verdict: the PSD projection candidates at 136 and 816 (accuracy checked against an exact projection, cold and warm-started), Cholesky and triangular solves at the IPM and tree sizes, the merge `eigh`/QR of the low-rank tree, and the coupling scatter/gather. Every primitive a milestone uses must be judged batched before that milestone starts. |
 | M1 | Outer models | §5.4 validity: 0 violations over $10^4$ samples per edge type (SDP κ = 1, 2; Taylor). Band report printed. |
 | M2 | Reference solve | CVXPY + Clarabel (or MOSEK) solves the full relaxation on the small instance and gives $J_{\text{rel}}$. $J_{\text{rel}} \le J_{\text{hand}}$. |
 | M3 | PDHG, run D | On the small instance, the objective reaches within 1e-4 relative of $J_{\text{rel}}$. Every logged $L$ is ≤ $J_{\text{rel}}$ (+ eps). Restarts fire and reduce the KKT error. Stopping test (§10.5): when it fires, $L_{\text{best}} \le J_{\text{rel}} \le U_{\text{flow}}$ within tolerance and the gap is ≤ η. |

@@ -740,7 +740,7 @@ def implied_by_equalities(g, eqs):
 
 
 def simplify_rows(eqs, ges, lo, hi, tol=1e-9):
-    """Cleans rows after substitution without changing the outer set (plan 5.1.7): drops rows that became constants, duplicates, and inequalities implied by the equalities. A single-variable inequality is a variable bound: it tightens the box and loses its row, but keeps its localizing block at kappa >= 2. Rows are (poly, tag, degree before substitution); returns (eqs, ges with an is-bound flag, lo, hi)."""
+    """Cleans rows after substitution without changing the outer set (plan 5.1.7): drops rows that became constants, duplicates, and inequalities implied by the equalities. A linear single-variable inequality is a variable bound: it tightens the box and loses its row, but keeps its localizing block at kappa >= 2. A quadratic row that became linear stays a row, because the full form's box never sees it. Rows are (poly, tag, degree before substitution); returns (eqs, ges with an is-bound flag, lo, hi)."""
     lo, hi = lo.copy(), hi.copy()
     constant = lambda p: not any(k for k in p)
     out_eq, seen = [], set()
@@ -766,7 +766,7 @@ def simplify_rows(eqs, ges, lo, hi, tol=1e-9):
             continue
         seen.add(key)
         terms = [k for k in p if k]
-        is_bound = len(terms) == 1 and len(terms[0]) == 1
+        is_bound = deg == 1 and len(terms) == 1 and len(terms[0]) == 1
         if is_bound:
             j, b = terms[0][0], p[terms[0]]
             edge = -p.get((), 0.0) / b

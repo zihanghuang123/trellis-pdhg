@@ -255,7 +255,7 @@ So each edge type solves its linear equalities first, $v = a + Z w$, and lifts o
 **It is the same outer set.** With the linear rows in force, a full moment vector is $m = T m_w$, where each row of $T$ writes one monomial of $v$ over the monomials of $w$.
 - $\mathcal M_\kappa(T m_w) = W \mathcal M_\kappa(m_w) W^\top$, and localizing blocks likewise, with $W$ of full column rank, so one is PSD exactly when the other is.
 - Each remaining row keeps the multipliers of its degree before substitution, so a row that becomes linear gains no extra multipliers. Adding them would be valid and tighter, but it would break the exact equality with the full form.
-- The bound row of a single-variable inequality moves into the box. At κ ≥ 2 its localizing block stays.
+- A linear inequality that reduces to one variable moves into the box. At κ ≥ 2 its localizing block stays. A quadratic inequality that reduces to one variable stays a row: moving it into the box would be valid and tighter (the goal edge's step bound gives $c_k \ge \cos 15°$ on T1), but the full form's box never sees it, so the two forms would differ.
 - Rows that become constants or duplicates go, and so do inequalities that the equalities reduce to a positive constant (for example the step bound of a static slider).
 
 M1 checks all of this algebraically, per edge type and without a solver. M2 checks it numerically: both forms must give the same $J_{\text{rel}}$. At κ ≥ 2 the quadratic equalities still force null directions in the moment matrix; removing those is left until the solver shows they matter.

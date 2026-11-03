@@ -123,7 +123,8 @@ extraction:
   k_paths: 8
   samples: 256
 
-render: {fps: 10, filmstrip_cols: 8}
+# Video (plan 13.5): a step lasts slow * dt on screen; force_scale is metres of arrow per newton.
+render: {fps: 30, slow: 3, width: 960, height: 720, elevation: -75, force_scale: 0.2, filmstrip_cols: 8}
 output: {root: runs}
 
 # Build-time CPU work (LP pruning, validity checks, reference solves) uses at most this many threads.

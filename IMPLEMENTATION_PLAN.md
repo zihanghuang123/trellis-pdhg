@@ -106,7 +106,7 @@ trellis-pdhg/                 # repo root; every script lives here
     matrix.yaml               # stage1 (8 jobs + tuning), stage2, stage3
   push_model.py               # §4–§6: geometry, modes, graph, relaxations, data arrays, reference CPU solve
   run_trajopt.py              # §7–§12: PDHG, edge solvers, skipping, certificate, trees, safeguard, main loop
-  extract_render.py           # §13: 4 extraction methods, metrics, mp4 + filmstrip rendering
+  extract_render.py           # §13: 4 extraction methods, metrics, GPU mp4 rendering + filmstrip
   compare.py                  # §14: cross-run tables and plots
   launch.py                   # §15: runs the matrix on 8 GPUs, with several processes per GPU
   runs/<run_name>/<task>/<seed>/...   # outputs (§12.4)
@@ -120,7 +120,7 @@ Shared helpers (YAML loading, index maps) can be duplicated between scripts. A l
 ## 3. Environment
 
 - `bash setup.sh` creates a dedicated conda environment, `trellis` (no DiffMJX), and prints the installed versions. Everything runs on the server.
-- Python 3.11+, `jax[cuda12]` (recent stable), `numpy`, `scipy`, `pyyaml`, `matplotlib`, `ffmpeg` (conda-forge), `cvxpy`, `clarabel`, `scs`. Add `mosek` if a license exists; it is optional and used only for reference checks.
+- Python 3.11+, `jax[cuda12]` (recent stable), `numpy`, `scipy`, `pyyaml`, `matplotlib`, `ffmpeg` (conda-forge), `cvxpy`, `clarabel`, `scs`, `mujoco` and `imageio[ffmpeg]` (videos only: MuJoCo draws frames and simulates nothing). Add `mosek` if a license exists; it is optional and used only for reference checks.
 - `jax.config.update("jax_enable_x64", True)` in every script. Bounds must be computed in float64. The iteration dtype is a config flag (`solver.dtype`, default `float64`).
 - Environment for each process: `XLA_PYTHON_CLIENT_PREALLOCATE=false`, `XLA_PYTHON_CLIENT_MEM_FRACTION=<1/procs_per_gpu - margin>`.
 - If available, enable CUDA MPS on each GPU so several small processes can share it efficiently (§15.3).
@@ -788,6 +788,8 @@ All unit tests from §5.4, §9.1, §9.2, §11.2, §11.3, §11.6 and §17 run on 
 
 ## 13. Extraction and rendering (`extract_render.py`) — proposal §6
 
+**Built so far:** method 1's top path, its guess file and its video. `--hand` sends the scripted true push through the same steps and checks the result against the true model's points, so a wrong video can be told apart from a wrong solve. The other three methods, `--methods`, the metrics table and the filmstrip come at M10.
+
 ### 13.1 Input
 A run directory (final state, or a chosen snapshot), plus `--methods all|<list>`.
 
@@ -811,13 +813,13 @@ A run directory (final state, or a chosen snapshot), plus `--methods all|<list>`
 - Also write a LEAP-ready guess file `extract/guess_<method>_<id>.npz` (mode ids per step, knot states $(N+1)\times D$, forces $N\times 2$, dt, task).
 
 ### 13.5 Rendering (no simulation)
-- Per guess, an `mp4` (matplotlib animation + ffmpeg) showing:
+- Per guess, an `mp4` drawn on the GPU: `mujoco.Renderer` under EGL with no osmesa fallback, frames through imageio, as `scripts/render.py` does in residual-controller. The bodies are mocap bodies with poses set directly, so the renderer only draws. The script does not import JAX, so it takes no memory from a solve. It shows:
   - the slider box at pose $(p, \theta)$, the goal box dashed, and a trail of the box center;
   - the pusher disk at $p + R(\theta) r$;
   - a contact force arrow at the contact point (world frame);
-  - text: method, step, mode name, cost so far.
+  - text (Pillow, since the renderer draws none): method, step, mode name, cost so far.
 - Per run, `extract/filmstrip.png`: 4 rows (methods) × 8 columns (evenly spaced knots), plus a final column overlaying all poses.
-- **Parallelize rendering** with a `multiprocessing.Pool` across CPU cores, one job per guess.
+- Several guesses can run one after another or as separate processes; each process needs its own EGL context, so a fork after one is opened is not safe.
 
 ---
 
@@ -870,7 +872,7 @@ A run directory (final state, or a chosen snapshot), plus `--methods all|<list>`
 - **Seeds.** One seed by default. Seeds change only the randomized parts (rounding samples, probes). Add a second seed only to measure run-to-run timing variance.
 - **Queue (throughput mode):** 8 GPUs × `procs_per_gpu` (default 4) worker slots. Each slot runs one job with `CUDA_VISIBLE_DEVICES=g` and a memory fraction of about 0.2. Planar pushing needs well under 20 GB per job, except κ = 3.
 - κ = 3 jobs and the full-exact certificate diagnostics get a **whole GPU** (`exclusive: true`).
-- After a job finishes, launch `extract_render.py` on it in a CPU pool, then `compare.py` at the end.
+- After a job finishes, launch `extract_render.py` on it, then `compare.py` at the end.
 - Re-running `launch.py` skips jobs that have `DONE` markers.
 
 ### 15.3 GPU sharing
@@ -995,7 +997,7 @@ extraction:
   methods: [flow_decomp, random_round, cert_kshortest, greedy]
   k_paths: 8
   samples: 256
-render: {fps: 10, filmstrip_cols: 8}
+render: {fps: 30, slow: 3, width: 960, height: 720, elevation: -75, force_scale: 0.2, filmstrip_cols: 8}
 output: {root: runs}
 ```
 

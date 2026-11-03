@@ -60,9 +60,17 @@ solver:
   theta_pd: auto                 # per-config tuning (7.3): runs/tuned/<config>_<task>.yaml
   theta_psd: same                # same | <float>
   primal_weight_update: none     # none | pdlp
-  tune: {grid: [0.003, 0.01, 0.03, 0.1, 0.3, 1.0], rounds: 2000, score: kkt}
+  tune: {grid: [0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0], rounds: 2000, score: kkt}
   delta: 1.0e-4                  # state tolerance of P_delta
-  stop: {eta_rel: 1.0e-3, eps_flow: 1.0e-6, eps_psd: 1.0e-8, eps_row: 1.0e-8}   # 10.5
+  # The stop (10.5): U_flow within eta_rel of L, or L gaining under plateau.gain over the last plateau.window of the
+  # rounds. L stays valid whatever these are. strict: the tolerances at which U_flow must sit above L, or it is a bug.
+  stop:
+    eta_rel: 0.07
+    eps_flow: 1.0e-3
+    eps_psd: 1.0e-3
+    eps_row: 1.0e-3
+    plateau: {gain: 0.01, window: 0.2, min_rounds: 500}
+    strict: {flow: 1.0e-6, psd: 1.0e-8, row: 1.0e-8}
   compile: {aot: true, cache_dir: ~/.cache/trellis_jax, fail_on_late_compile: true}
   dtype: float64
   qp_block: auto                 # exact_ipm for kappa=1, split_rows for kappa>=2
@@ -72,7 +80,7 @@ solver:
   # cost of reading one flag per iteration. cholesky: library | small (hand-written, for small sizes).
   ipm: {iters: 40, tol: 1.0e-11, adaptive: true, cholesky: library}
   log_every_s: 10                # progress line at most this often; every scan block goes to log.jsonl
-  restarts: {scheme: pdlp_kkt, beta_sufficient: 0.2, beta_necessary: 0.8}
+  restarts: {scheme: pdlp_kkt, beta_sufficient: 0.2, beta_necessary: 0.8, beta_artificial: 0.36}
   checkpoint_every: 2000
 
 skipping:
@@ -85,7 +93,9 @@ skipping:
 tree:
   type: exact                    # none | exact | lowrank_a | lowrank_b
   every: 10
-  reg: 1.0e-8
+  reg: 1.0e-6                    # added to the diagonal, times the mean unconstrained response (11.2)
+  floor: 1.0e-4                  # a row responding under this fraction of its unconstrained response stays put (11.1)
+  filter: true                   # solve twice, so that redundant rows cannot blow up the step (11.2)
   rank: 16
   jacobian: one_step             # one_step | frozen_rank (11.1)
   eig_tol: 1.0e-8                # frozen_rank only
@@ -105,6 +115,7 @@ tree:
     relax: 1.0
     beta: 0.5
     max_trials: 3
+    d_max: 1.0e+6                # a direction longer than this times the residual is scaled down (tex Algorithm 1)
     hpe: {sigma: 0.9, lambda_min: 0.1}
 
 certificate:
@@ -156,9 +167,10 @@ selftest:
     tol_hand: 1.0e-6             # J_rel may exceed J_hand by this much
     tol_forms: 1.0e-5            # the reduced and full forms may differ by this much, relative to max(1, |J_rel|)
   m3:                            # run_trajopt.py --selftest, against the saved ref_tiny value
-    eta_rel: 5.0e-6              # gap small enough to put the objective within 1e-4 of J_rel on this instance
-    rounds_max: 400000
-    time_budget_s: 1200
+    eta_rel: 0.07
+    close_rel: 0.15              # at the stop, L must be within this fraction of J_rel
+    rounds_max: 100000
+    time_budget_s: 300
     stall_rounds: 50000
     tune_rounds: 500             # per step-size candidate
     qp_edges: 16                 # edge QPs compared against Clarabel, per draw

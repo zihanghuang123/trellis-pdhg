@@ -1,12 +1,14 @@
-"""Extracts a trajectory from a solve and renders it on the GPU (plan section 13). So far: the top path of method 1 and its video; the other methods, the metrics table and the filmstrip come at M10.
+"""Extracts trajectories from a solve and renders them on the GPU (plan section 13), four ways: heaviest paths, randomized rounding, the certificate's k shortest paths, and greedy. The metrics table and the filmstrip come at M10.
 
     python extract_render.py --run ref_tiny --hand       # the scripted true push through the same steps, which checks this script
-    python extract_render.py --run D                     # the heaviest path of the run's final_state.npz
-    python extract_render.py --run D --no_video          # the same, without drawing
+    python extract_render.py --run A                     # all four on the run's final_state.npz: a guess file per path, a video of each method's best
+    python extract_render.py --run A --methods greedy,flow_decomp --videos 3
+    python extract_render.py --run A --no_video          # guess files and the printed numbers only
 
 What it renders is a guess, not a true trajectory: first moments average all the flow through an edge, and nothing here enforces the true model (plan 13.3). The printed knot mismatch and rotation error say how far it is from one.
 """
 import argparse
+import heapq
 import itertools
 import json
 import math
@@ -25,9 +27,11 @@ import numpy as np
 import push_model as pm
 
 ROOT = Path(__file__).resolve().parent
-METHOD = "flow_decomp"
+# The extraction methods (plan 13.2): each one's name in titles, and what its weight means.
+METHODS = dict(flow_decomp=("heaviest path", "flow"), random_round=("rounded path", "share of samples"), cert_kshortest=("certificate path", "value"), greedy=("greedy path", "smallest flow"))
 SLIDER_HALF_HEIGHT = 0.02       # drawing only: the model is planar
 FLOW_FLOOR = 1e-12
+FLOW_LEFT = 1e-6                # path decomposition stops below this (plan 13.2)
 
 
 # ===== PROBLEM =====
@@ -38,7 +42,7 @@ def run_dir(cfg):
 
 
 def ensure_problem(cfg, run, task, sets):
-    """Loads the run's problem.npz, first building it when it is missing or came from another config (plan 12.1). Returns it as a dict with s, t, N and M as plain ints, as the trellis helpers in push_model.py expect."""
+    """Loads the run's problem.npz, first building it when it is missing or came from another config (plan 12.1). Returns it as a dict with s, t, N and M as plain ints, as the trellis helpers in push_model.py expect, plus the alive edges and each edge's place among them."""
     path = run_dir(cfg) / "problem.npz"
     fresh = False
     if path.exists():
@@ -54,26 +58,29 @@ def ensure_problem(cfg, run, task, sets):
         prob = {k: z[k] for k in z.files}
     if str(prob["rel_kind"]) != "sdp":
         raise NotImplementedError("extraction reads the SDP layout so far; run B's Taylor layout comes at M10")
-    return dict(prob, s=int(prob["s"]), t=int(prob["t"]), N=int(prob["N"]), M=int(prob["M"]))
+    alive = np.flatnonzero(prob["edge_alive"])
+    place = np.full(prob["edge_tail"].size, -1, np.int64)
+    place[alive] = np.arange(alive.size)
+    return dict(prob, s=int(prob["s"]), t=int(prob["t"]), N=int(prob["N"]), M=int(prob["M"]), alive=alive, place=place)
 
 
 def load_solve(prob, path):
-    """The final m of a solve over the alive edges, after checking that it belongs to this problem."""
+    """The final m and prices of a solve over the alive edges, and its edge bounds if it saved them, after checking that it belongs to this problem."""
     if not path.exists():
         raise SystemExit(f"no solve at {path}; run_trajopt.py saves it when a run ends by itself, so a run stopped with Ctrl-C leaves none")
     with np.load(path) as z:
-        m, alive = z["m"], z["alive"]
-    if not np.array_equal(alive, np.flatnonzero(prob["edge_alive"])):
+        solve = dict(m=z["m"], p=z["p"], alive=z["alive"], lb=z["lb"] if "lb" in z.files else None)
+    if not np.array_equal(solve["alive"], prob["alive"]):
         raise SystemExit(f"{path} came from another problem; rerun the solve")
-    return m
+    return solve
 
 
 # ===== EXTRACTION =====
-# Plan 13.2 and 13.3, on the numpy side since a path is one small search.
+# Plan 13.2 and 13.3, on the numpy side since a path is one small search over a few thousand edges.
 
 def heaviest_path(prob, y):
-    """Method 1's top path (plan 13.2): the start-goal path whose smallest flow is largest, by a DP over the layers. An iterate that does not conserve flow exactly still gives a connected path, which following the largest edge need not. y holds the alive edges' flows; returns (edge ids in layer order, the path's flow)."""
-    tails, heads, layers, alive = prob["edge_tail"], prob["edge_head"], prob["edge_layer"], np.flatnonzero(prob["edge_alive"])
+    """Method 1's top path (plan 13.2): the start-goal path whose smallest flow is largest, by a DP over the layers. It also gives a sensible path on an iterate that does not conserve flow exactly. y holds the alive edges' flows; returns (edge ids in layer order, the path's flow)."""
+    tails, heads, layers, alive = prob["edge_tail"], prob["edge_head"], prob["edge_layer"], prob["alive"]
     flow = np.zeros(tails.size)
     flow[alive] = np.maximum(y, 0.0)
     best, came = np.full(prob["t"] + 1, -np.inf), np.full(prob["t"] + 1, -1)
@@ -91,6 +98,149 @@ def heaviest_path(prob, y):
         path.append(int(came[v]))
         v = int(tails[path[-1]])
     return path[::-1], float(best[prob["t"]])
+
+
+def flow_paths(prob, y, k):
+    """Method 1 (plan 13.2): repeatedly take the heaviest path and subtract its flow, until the flow left is negligible. The weights never rise, so the first k are the top k. Returns [(edges, weight)]."""
+    left, paths = y.copy(), []
+    for _ in range(k):
+        edges, weight = heaviest_path(prob, left)
+        if weight < FLOW_LEFT and paths:
+            break
+        paths.append((edges, weight))
+        left[prob["place"][edges]] -= weight
+    return paths
+
+
+def rounded_paths(prob, y, m, samples, k, seed):
+    """Method 2 (plan 13.2, tex Prop rounding has the flow's marginals): at each vertex take an outgoing edge with probability flow / outflow, for all samples at once per layer. Duplicates merge, and the k paths with the lowest relaxed cost stay. Every alive edge keeps a tiny weight, so a sample that reaches a vertex with no outflow still moves on. Returns [(edges, share of the samples)]."""
+    rng = np.random.default_rng(seed)
+    tails, heads, layers, alive = prob["edge_tail"], prob["edge_head"], prob["edge_layer"], prob["alive"]
+    weight = np.zeros(tails.size)
+    weight[alive] = np.maximum(y, 0.0) + FLOW_FLOOR
+    at = np.full(samples, prob["s"])
+    chosen = np.zeros((samples, prob["N"]), np.int64)
+    for layer in range(prob["N"]):
+        idx = alive[layers[alive] == layer]
+        idx = idx[np.argsort(tails[idx], kind="stable")]
+        total = np.cumsum(weight[idx])
+        first, last = np.searchsorted(tails[idx], at, side="left"), np.searchsorted(tails[idx], at, side="right") - 1
+        below = np.where(first > 0, total[np.maximum(first - 1, 0)], 0.0)
+        pick = np.clip(np.searchsorted(total, below + rng.random(samples) * (total[last] - below)), first, last)
+        chosen[:, layer] = idx[pick]
+        at = heads[idx[pick]]
+    unique, counts = np.unique(chosen, axis=0, return_counts=True)
+    order = np.argsort(relaxed_costs(prob, alive, m)[prob["place"][unique]].sum(axis=1), kind="stable")[:k]
+    return [([int(e) for e in unique[i]], float(counts[i]) / samples) for i in order]
+
+
+def certificate_paths(prob, lb, k):
+    """Method 3's paths (plan 13.2): the k cheapest start-goal paths by the certificate's edge bounds, from a DP over the layers that keeps the k best ways to reach each vertex. The first path's value is the free bound L_0 at these prices and multipliers. Returns [(edges, value)]."""
+    tails, heads, layers, alive = prob["edge_tail"], prob["edge_head"], prob["edge_layer"], prob["alive"]
+    best = {prob["s"]: [(0.0, -1, 0)]}                  # vertex: its best (value, incoming edge, rank in that edge's tail)
+    for layer in range(prob["N"]):
+        incoming = {}
+        for e in alive[layers[alive] == layer]:
+            for rank, (value, _, _) in enumerate(best.get(int(tails[e]), [])):
+                incoming.setdefault(int(heads[e]), []).append((value + float(lb[prob["place"][e]]), int(e), rank))
+        best.update({v: heapq.nsmallest(k, items) for v, items in incoming.items()})
+    paths = []
+    for value, e, rank in best[prob["t"]]:
+        edges = []
+        while e >= 0:
+            edges.append(e)
+            _, e, rank = best[int(tails[e])][rank]
+        paths.append((edges[::-1], value))
+    return paths
+
+
+def greedy_path(prob, y):
+    """Method 4 (plan 13.2): from the start, the outgoing edge with the most flow. Pruning keeps only edges on some start-goal path, so this always reaches the goal, though on an iterate that does not conserve flow it can walk through edges with no flow. Returns (edges, the smallest flow on them)."""
+    tails, heads, alive = prob["edge_tail"], prob["edge_head"], prob["alive"]
+    flow = np.maximum(y, 0.0)
+    path, v = [], prob["s"]
+    while v != prob["t"]:
+        here = np.flatnonzero(tails[alive] == v)
+        e = int(alive[here[np.argmax(flow[here])]])
+        path.append(e)
+        v = int(heads[e])
+    return path, float(flow[prob["place"][path]].min())
+
+
+def relaxed_costs(prob, edges, rows):
+    """Each edge's relaxed cost per unit flow, c^T m / y, with the entries kept inside the edge type's box since a tiny flow makes the division noisy."""
+    types = prob["edge_type"][edges]
+    n = rows.shape[1]
+    y = np.maximum(rows[:, :1], FLOW_FLOOR)
+    return np.sum(prob["rel_c"][types, :n] * np.clip(rows / y, prob["rel_lo"][types, :n], prob["rel_hi"][types, :n]), axis=1)
+
+
+def make_pricer(cfg, prob, md, modes, task, p):
+    """A function from an edge id to arg min pi_e(lambda) as a row of m (plan 13.3, tex Initialization): the edge's own conic program at y = 1, with the final state prices in its cost. This runs Clarabel on the CPU, since a path needs only a few of these, and each is kept once solved."""
+    import clarabel
+    import scipy.sparse as sp
+    alive = prob["alive"]
+    verts = np.unique(np.r_[prob["edge_tail"][alive], prob["edge_head"][alive]])
+    index = np.full(prob["t"] + 1, -1, np.int64)
+    index[verts] = np.arange(verts.size)
+    lam = p.copy()
+    lam[:, 0] = 0.0                                     # flow prices cancel along a path
+    settings = clarabel.DefaultSettings()
+    settings.verbose = False
+    settings.max_threads = 1
+    settings.tol_gap_abs = settings.tol_gap_rel = settings.tol_feas = float(cfg["reference"]["clarabel"]["tol"])
+    programs, priced = {}, {}
+
+    def program(ti):
+        rel = pm.relax_edge_type(cfg, md, task, modes, prob, ti)
+        rows = pm.type_conic_rows(rel, "clarabel")
+        flow = sp.csr_matrix(([1.0], ([0], [0])), shape=(1, rel["n"]))
+        A = sp.vstack([rows["zero"], flow, -rows["nonneg"], -rows["psd"]], format="csc")
+        A.sort_indices()
+        zeros = rows["zero"].shape[0] + 1
+        b = np.zeros(A.shape[0])
+        b[zeros - 1] = 1.0
+        return rel, A, b, [clarabel.ZeroConeT(zeros), clarabel.NonnegativeConeT(rows["nonneg"].shape[0])] + [clarabel.PSDTriangleConeT(int(s)) for s in rows["sizes"]]
+
+    def price(e):
+        e = int(e)
+        if e not in priced:
+            ti = int(prob["edge_type"][e])
+            if ti not in programs:
+                programs[ti] = program(ti)
+            rel, A, b, cones = programs[ti]
+            cost = rel["c"] + rel["head_map"].T @ lam[index[prob["edge_head"][e]]] - rel["tail_map"].T @ lam[index[prob["edge_tail"][e]]]
+            sol = clarabel.DefaultSolver(sp.csc_matrix((rel["n"], rel["n"])), cost, A, b, cones, settings).solve()
+            if str(sol.status) not in ("Solved", "AlmostSolved"):
+                print(f"  pricing edge {e} ended with status {sol.status}, so its point is unreliable", flush=True)
+            priced[e] = np.zeros(int(prob["rel_n"].max()))
+            priced[e][:rel["n"]] = np.asarray(sol.x)
+        return priced[e]
+
+    return price
+
+
+def method_paths(cfg, prob, md, modes, task, solve, method):
+    """One method's paths, best first, as [(edges, weight, rows of m)]. Rows are the solve's own, except on a certificate path, which has no flow to read and uses the priced minimizers (plan 13.3)."""
+    ext, m = cfg["extraction"], solve["m"]
+    k, y = int(ext["k_paths"]), m[:, 0]
+    if method == "cert_kshortest":
+        price = make_pricer(cfg, prob, md, modes, task, solve["p"])
+        return [(edges, value, np.array([price(e) for e in edges])) for edges, value in certificate_paths(prob, solve["lb"], k)]
+    if method == "flow_decomp":
+        paths = flow_paths(prob, y, k)
+    elif method == "random_round":
+        paths = rounded_paths(prob, y, m, int(ext["samples"]), k, int(cfg["seed"]))
+    else:
+        paths = [greedy_path(prob, y)]
+    return [(edges, weight, m[prob["place"][edges]]) for edges, weight in paths]
+
+
+def check_path(prob, edges):
+    """Stops on anything but a connected start-goal path of alive edges (plan 17, M10)."""
+    tails, heads = prob["edge_tail"][edges], prob["edge_head"][edges]
+    if tails[0] != prob["s"] or heads[-1] != prob["t"] or np.any(heads[:-1] != tails[1:]) or not np.all(prob["edge_alive"][edges]):
+        raise RuntimeError(f"not a start-goal path of alive edges: {edges}")
 
 
 def edge_points(prob, edges, rows):
@@ -131,9 +281,8 @@ def hand_rows(cfg, prob, md, modes, task):
     """The scripted push (T1 only) as a flow of one on its edges and zero elsewhere. Only the entries extraction reads are filled. Returns (m over the alive edges, its edges, its true edge-layout points)."""
     steps = pm.hand_push(cfg, md, task, modes)
     edges = pm.path_edge_ids(prob, modes, steps)
-    alive = np.flatnonzero(prob["edge_alive"])
-    place = {int(e): i for i, e in enumerate(alive)}
-    m = np.zeros((alive.size, int(prob["rel_n"].max())))
+    place = prob["place"]
+    m = np.zeros((prob["alive"].size, int(prob["rel_n"].max())))
     for (_, _, _, v), e in zip(steps, edges):
         ti = int(prob["edge_type"][e])
         nv = int(prob["rel_nv"][ti])
@@ -294,6 +443,23 @@ def render_video(cfg, md, task, knots, forces, pairs, costs, title, path):
     print(f"saved {path}", flush=True)
 
 
+def report_guess(cfg, prob, md, modes, task, out, name, title, weight_name, edges, weight, rows, video):
+    """One guess: its knots, forces and numbers, printed and saved as guess_<name>.npz (plan 13.3, 13.4), with its video if asked. Returns the pieces --hand checks."""
+    check_path(prob, edges)
+    v = edge_points(prob, edges, rows)
+    knots, forces, mismatch = knots_and_forces(v)
+    pairs = step_modes(prob, modes, edges)
+    costs = step_costs(cfg, knots, forces, pairs)
+    norm_error = float(np.max(np.abs(knots[:, 2] ** 2 + knots[:, 3] ** 2 - 1.0)))
+    print(f"{name}: {weight_name} {weight:.6f}, relaxed cost {relaxed_costs(prob, edges, rows).sum():.6f}, cost at the extracted points {costs.sum():.6f}, largest knot mismatch {np.max(mismatch, initial=0.0):.2e}, largest |c^2 + s^2 - 1| {norm_error:.2e}", flush=True)
+    print(f"  modes: {mode_sequence(pairs)}", flush=True)
+    np.savez(out / f"guess_{name}.npz", modes=np.array([int(prob["type_tail"][prob["edge_type"][e]]) for e in edges]), edges=np.array(edges), knots=knots, forces=forces,
+             dt=md["dt"], task=cfg["task"], weight=weight, knot_mismatch=mismatch)
+    if video:
+        render_video(cfg, md, task, knots, forces, pairs, costs, title, out / f"{name}.mp4")
+    return v, knots, costs, pairs
+
+
 # ===== MAIN =====
 
 def main():
@@ -302,6 +468,8 @@ def main():
     ap.add_argument("--task", default=None, help="task name, overriding the config")
     ap.add_argument("--set", action="append", default=[], help="override one key, e.g. --set render.slow=1; keys the model depends on must match the solve")
     ap.add_argument("--hand", action="store_true", help="use the scripted true push (T1) instead of a solve, and check the extraction against it")
+    ap.add_argument("--methods", default="all", help=f"all, or a comma-separated list of {', '.join(METHODS)}")
+    ap.add_argument("--videos", type=int, default=1, help="videos per method, best paths first; every path gets a guess file")
     ap.add_argument("--no_video", action="store_true", help="extract and print only")
     args = ap.parse_args()
     if not args.run:
@@ -312,36 +480,30 @@ def main():
         cfg["task"] = args.task
     prob = ensure_problem(cfg, args.run, args.task, args.set)
     md, modes, task = pm.build_model(cfg), pm.build_modes(cfg), pm.resolve_task(cfg)
-    alive = np.flatnonzero(prob["edge_alive"])
+    out = run_dir(cfg) / "extract"
+    out.mkdir(parents=True, exist_ok=True)
     if args.hand:
         try:
             m, hand_edges, truth = hand_rows(cfg, prob, md, modes, task)
         except ValueError as exc:
             raise SystemExit(f"--hand needs a task the script covers: {exc}")
-    else:
-        m = load_solve(prob, run_dir(cfg) / "final_state.npz")
-    edges, weight = heaviest_path(prob, m[:, 0])
-    place = {int(e): i for i, e in enumerate(alive)}
-    v = edge_points(prob, edges, m[[place[e] for e in edges]])
-    knots, forces, mismatch = knots_and_forces(v)
-    pairs = step_modes(prob, modes, edges)
-    costs = step_costs(cfg, knots, forces, pairs)
-    norm_error = float(np.max(np.abs(knots[:, 2] ** 2 + knots[:, 3] ** 2 - 1.0)))
-    print(f"{cfg['run_name']} on {cfg['task']}: path flow {weight:.6f}, cost at the extracted points {costs.sum():.6f}, largest knot mismatch {np.max(mismatch, initial=0.0):.2e}, largest |c^2 + s^2 - 1| {norm_error:.2e}", flush=True)
-    print(f"modes: {mode_sequence(pairs)}", flush=True)
-    ok = True
-    if args.hand:
+        edges, weight = heaviest_path(prob, m[:, 0])
+        v, knots, costs, pairs = report_guess(cfg, prob, md, modes, task, out, "hand", "hand push", "path flow", edges, weight, m[prob["place"][edges]], not args.no_video)
         J_hand = float(sum(pm.poly_eval(pm.edge_cost(cfg, tail, head), row) for row, (tail, head) in zip(truth, pairs)))
-        ok = check_hand(edges, weight, v, knots, costs, hand_edges, truth, J_hand)
-    name = "hand" if args.hand else f"{METHOD}_0"
-    out = run_dir(cfg) / "extract"
-    out.mkdir(parents=True, exist_ok=True)
-    np.savez(out / f"guess_{name}.npz", modes=np.array([int(prob["type_tail"][prob["edge_type"][e]]) for e in edges]), edges=np.array(edges), knots=knots, forces=forces,
-             dt=md["dt"], task=cfg["task"], path_flow=weight, knot_mismatch=mismatch)
-    if not args.no_video:
-        title = "hand push" if args.hand else f"{cfg['run_name']}: heaviest path, flow {weight:.3f}"
-        render_video(cfg, md, task, knots, forces, pairs, costs, title, out / f"{name}.mp4")
-    sys.exit(0 if ok else 1)
+        sys.exit(0 if check_hand(edges, weight, v, knots, costs, hand_edges, truth, J_hand) else 1)
+    solve = load_solve(prob, run_dir(cfg) / "final_state.npz")
+    methods = list(cfg["extraction"]["methods"]) if args.methods == "all" else args.methods.split(",")
+    unknown = [method for method in methods if method not in METHODS]
+    if unknown:
+        raise SystemExit(f"unknown methods {unknown}; choose from {', '.join(METHODS)}")
+    print(f"{cfg['run_name']} on {cfg['task']}", flush=True)
+    for method in methods:
+        if method == "cert_kshortest" and solve["lb"] is None:
+            print(f"{method}: skipped, since this final_state.npz has no edge bounds; rerun the solve", flush=True)
+            continue
+        label, weight_name = METHODS[method]
+        for rank, (edges, weight, rows) in enumerate(method_paths(cfg, prob, md, modes, task, solve, method)):
+            report_guess(cfg, prob, md, modes, task, out, f"{method}_{rank}", f"{cfg['run_name']}: {label} {rank}, {weight_name} {weight:.3f}", weight_name, edges, weight, rows, not args.no_video and rank < args.videos)
 
 
 if __name__ == "__main__":

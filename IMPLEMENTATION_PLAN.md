@@ -391,6 +391,7 @@ M1 prints the resulting sizes per group of edge types. They set the size of the 
 - PDLP-style restart to the average. Track the running average since the last restart.
 - Compute a normalized KKT error (primal residual, dual residual, gap estimate) for the current iterate and for the average.
 - Restart to the better candidate when its KKT error ≤ 0.2 × the error at the last restart. Also restart when it is ≤ 0.8 × that error and is larger than the previous candidate's.
+- **Also restart when the current epoch has reached 36 % of all rounds** (`restarts.beta_artificial`, PDLP's artificial restart). The KKT error below is a fixed-point residual, which cannot rise for the current iterate because a round is nonexpansive, so the "larger than the previous candidate" test rarely fires. Without this third trigger, the first M3 run restarted only on the 5× drop: 4 restarts from round 2,050 to round 17,400, and a KKT error falling like 1/√k, plain PDHG's rate.
 - A fixed-frequency option is available as a fallback.
 - Restarts move every edge's center. Skipping handles this automatically (§9.1 uses the current center).
 - **The KKT error is the fixed-point residual** $\|z - \mathcal T(z)\|_P$ (tex Lemma 4.3), not separate primal, dual and gap terms. It is zero exactly at a saddle point, one extra round computes it, and the dual residual would otherwise need a projection onto each edge polytope's normal cone. Restarted PDHG with this measure is standard (restarted Halpern PDHG). Tuning compares different θ, whose $P$ norms are not comparable, so it scores with $\sqrt{\text{gap}^2 + \text{violations}^2}$ instead.
@@ -535,15 +536,18 @@ On small instances only: solve the full relaxation $P_\delta$ on the CPU to get 
 - **$U_{\text{flow}}$** is the relaxed cost $\sum_e \hat\ell_e(m_e)$ of a primal candidate. It is an upper bound on $J_{P_\delta}$ when the candidate is feasible for $P_\delta$.
 - **Candidates:** the current iterate and the restart average (§7.4). Check both and use the smallest $U_{\text{flow}}$ among those that pass.
 - **Feasibility checks.** PDHG reaches these only in the limit, so each uses a signed numerical tolerance, logged at stop:
-  1. Flow conservation: $|K_{\text{flow}}m - b_{\text{flow}}| \le$ `eps_flow` (1e-6) at every vertex. Flow is exact in the proposal; this is only numerical slack.
-  2. State mismatch: $\|K_{\text{state}}m - b_{\text{state}}\|_\infty \le \delta$ at every vertex. This includes second-moment coordinates when they are coupled.
-  3. Each edge's polyhedral rows hold to the IPM tolerance. For κ ≥ 2 (`split_rows`), also the dualized rows, to `eps_row` (1e-8).
-  4. Each PSD block: $\lambda_{\min}(\mathcal B_{e,b}(m_e)) \ge -\,$`eps_psd`$\cdot(1 + \|\mathcal B_{e,b}(m_e)\|)$, with `eps_psd` = 1e-8. Use batched `eigvalsh` on the blocks.
-- **Stop** when a candidate passes 1–4 and $U_{\text{flow}} - L_{\text{best}} \le \eta\cdot\max(1, |L_{\text{best}}|)$, with η = `stop.eta_rel` (1e-3). $L_{\text{best}}$ is the best certified bound so far (free, lazy, B&B).
-- **Assert** $U_{\text{flow}} \ge L_{\text{best}} - 10^{-5}\max(1, |L_{\text{best}}|)$. A violation means a bug in the bound or in the checks; stop with an error. The slack is larger than the 1e-8 first planned because a candidate that passes with flow residual `eps_flow` can legitimately cost up to `eps_flow` × (the flow prices) less than $J_{\text{rel}}$.
+  1. Flow conservation: $|K_{\text{flow}}m - b_{\text{flow}}| \le$ `eps_flow` (1e-3) at every vertex. Flow is exact in the proposal; this is only numerical slack.
+  2. State mismatch: $\|K_{\text{state}}m - b_{\text{state}}\|_\infty \le \delta +$ `eps_flow` at every vertex. This includes second-moment coordinates when they are coupled.
+  3. Each edge's polyhedral rows hold to `eps_row` (1e-3). For κ ≥ 2 (`split_rows`), also the dualized rows.
+  4. Each PSD block: $\lambda_{\min}(\mathcal B_{e,b}(m_e)) \ge -\,$`eps_psd`$\cdot(1 + \|\mathcal B_{e,b}(m_e)\|)$, with `eps_psd` = 1e-3. Use batched `eigvalsh` on the blocks.
+- **Stop** at the first of these two:
+  1. a candidate passes 1–4 and $|U_{\text{flow}} - L_{\text{best}}| \le \eta\,|U_{\text{flow}}|$, on either side since an infeasible iterate can cost well below $L$, with η = `stop.eta_rel` (7 %). A gap of about 7 % is an accepted certificate. The gap is relative to the cost itself, since the costs here are about 0.06, where the plan's first form, $\max(1, |L|)$, makes any η absolute;
+  2. `plateau`: $L_{\text{best}} > 0$ gained under `plateau.gain` (1 %) of itself over the last `plateau.window` (20 %) of the rounds, after at least `plateau.min_rounds` (500). All costs are nonnegative, so a bound at or below zero says nothing yet.
+- **With tolerances this loose, $U_{\text{flow}}$ is an estimate, not a bound.** An infeasible iterate can cost less than the optimum, as the first M3 run showed: at round 2,050 it cost 1.9 % below $J_{\text{rel}}$. Only $L$ is certified. The certified gap against a real trajectory, $U_{\text{traj}} - L_0$, needs the local solver. On T1, $J_{\text{hand}}$ can stand in for it.
+- **Assert** $U_{\text{flow}} \ge L_{\text{best}} - 10^{-5}\max(1, |L_{\text{best}}|)$ for a candidate that also passes `stop.strict` (flow 1e-6, PSD 1e-8, rows 1e-8). A violation means a bug in the bound or in the checks; stop with an error. It cannot be asked of the loose candidates above.
 - **When:** at every scan-block boundary (every 50 rounds), where the host already synchronizes.
 - **What the tolerances affect.** They change only when the run stops. $L$ stays rigorous whatever they are.
-- **Status** goes to `cert.json`: `converged_eta`, `round_cap`, `time_cap` or `stalled`. Only `converged_eta` counts as reaching η in comparisons; the others are reported with their final gap.
+- **Status** goes to `cert.json`: `converged_eta`, `plateau`, `round_cap`, `time_cap` or `stalled`. `converged_eta` and `plateau` count as finished solves in comparisons, reported with their final gap and which stop fired; the others are safety stops.
 - **Not used for stopping:** the true-model cost of an extracted guess (§13.4). It is not a feasible trajectory. The trajectory gap $U_{\text{traj}} - L_0$ is computed only once LEAP exists.
 
 ---
@@ -572,26 +576,30 @@ All tree types (exact, C-a, C-b) share §11.1 and §11.6. They differ only in th
   These describe the tangent space of the fixed-rank PSD set, so a rank-1 moment matrix can still rotate, i.e. its state can change. Freezing the whole face would hide the state response.
 
   This option models the response *after* $\Lambda$ has adapted. A prices-only trial does not realize it in one step, so it is an experiment, not the default.
-- **Formula.** Stack the frozen equalities as $E_e$ and let $H_e = \mathrm{diag}(T_e^{-1})$. Then
+- **Formula (the definition).** Stack the frozen equalities as $E_e$ and let $H_e = \mathrm{diag}(T_e^{-1})$. Then
 $$J_e^{\text{full}} = H^{-1} - H^{-1}E_e^\top\,(E_e H^{-1}E_e^\top)^{+}\,E_e H^{-1}.$$
-  Compute the pseudo-inverse by `eigh` with relative tolerance 1e-12, because frozen rows can be redundant.
+- **How it is computed: from the edge step's last IPM iterate, not by this formula.** The frozen rows can number about 100, and `eigh` above 32×32 runs matrix by matrix (M0: 45 µs each at 136, so up to 100 ms per pass), which fails §0. The derivative of the barrier solution with respect to the linear term is
+$$J_e = \tilde H^{-1} - \tilde H^{-1}R^\top(R\tilde H^{-1}R^\top + W)^{-1}R\tilde H^{-1},$$
+  where $\tilde H$ is the arrow matrix of §8.1 and $W = \mathrm{diag}(s_g/z_g)$. Its inverse is closed form, so the only factorization is a Cholesky of the few rows after elimination, with a relative shift of 1e-12 because frozen rows can be redundant. As the barrier goes to zero this tends to the formula above: an active bound's weight $z/s$ grows without limit, an inactive bound's goes to zero, an active row's $W$ goes to zero, an inactive row's grows, and at the apex both bounds of every entry are active, so $J_e \to 0$ (tex: zero-flow edges are invisible). No threshold decides what is active.
 - $S$ receives $K_e J_e^{\text{full}} K_e^\top$ on the edge's coupled coordinates ($2q-1$ of them; flow is shared).
 - Batch over edges in buckets. **Count each $J_e$ as one derivative evaluation.**
 
 **Exact assembly.**
 - Scatter the edge blocks into the diagonal blocks $D_k$ and off-diagonal blocks $E_k$ ($w\times w$).
-- Add `tree.reg` · (mean diagonal) · I, default 1e-8.
+- Add `tree.reg` · (mean unconstrained response) · I, default 1e-6 (§11.2).
 
 **Right-hand side** (proposal §12.4: "the uncompressed chosen model's residual on the right").
 - Compute it from the **actual** edge outputs $m^+$ of the current ordinary round, never from a compressed or reference model:
 $$r = \Sigma_p^{-1}\,(\hat p - p),\qquad \hat p = \mathrm{prox}_{\sigma g^*}\!\big(p + \Sigma_p(Km^+ - b)\big)\quad\text{(non-extrapolated dual update).}$$
 - For flow rows, $r = Km^+ - b$. For state rows, $r$ includes the δ-ball shrink.
+- **Which rows are solved (tex Prop. exact proximal step).** Flow rows and state rows at their δ bound (the prox is on its shifted branch) are equalities. A state row inside its bound has a zero price at the solution, so $\Delta p = -p$ there, moved to the right-hand side of the others. A row that barely responds keeps $\Delta p = 0$: its response in $S$ is under `tree.floor` (1e-4) of its unconstrained response, the diagonal of $KTK^\top$. Its edges carry almost no flow or its coordinate sits at a bound, and a frozen face says nothing about how far it could move.
 - $r = 0$ exactly at a PDHG fixed point, so every tree type returns $\Delta p = 0$ there. Tested in M7: "A zero residual must produce zero correction even after compression."
 
 **Direction: trees propose price changes only, for all three tree types.**
 - Current point: $z = (m, S, p, \Lambda)$. The tree solves $\tilde S\,\Delta p = r$ for the vertex prices. The direction is $d = (0, 0, \Delta p, 0)$.
 - The edges' response to the new prices is obtained by the **actual edge updates** inside the check (§11.6): $T(z + \tau d)$ re-solves the edges, with exact skipping, at the same prox center $m$ and prices $p + \tau\Delta p$.
 - Using the same form for all tree types keeps the comparison fair. It also means each trial evaluation and the ordinary round $T(z)$ share the same centers, so their difference is a clean measurement of the edges' response to a price change. C-b uses this measurement as data (§11.5).
+- The direction is capped at `safeguard.d_max` (1e6) times $\|R(z)\|_P$ (tex Algorithm 1), and a tree pass also evaluates the free bound at each trial's prices, which is valid whether or not the trial is kept.
 - Optional flag `tree.primal_predict: true` (exact tree and C-a only): also move the center to $m^+ - J^{\text{full}}K^\top\Delta p$. Default false.
 
 ### 11.2 Exact tree (runs A, A-κ, A-reg, B): odd–even block cyclic reduction
@@ -604,11 +612,12 @@ $$r = \Sigma_p^{-1}\,(\hat p - p),\qquad \hat p = \mathrm{prox}_{\sigma g^*}\!\b
   - Back-substitute the odd layers on the way down.
   - The Cholesky factors of $D_{\text{odd}}$ are computed once per level and reused in both passes.
 - Pad $N$ to a power of two with identity blocks. Depth $2\lceil\log_2 N\rceil$.
+- **Solve twice** (`tree.filter`, default true): $\Delta p = (S+\epsilon)^{-1}S(S+\epsilon)^{-1}r$. Rows are exactly redundant at contact vertices, and the flow rows have a constant null direction, so $S$ is singular. A plain solve multiplies any inconsistency in $r$ by up to $1/\epsilon$. The filter's factor on an eigenvalue $\lambda$ is $\lambda/(\lambda+\epsilon)^2$: $1/\lambda$ where it matters and 0 on an exact null direction. Its largest value is $1/(4\epsilon)$, at $\lambda = \epsilon$, which is why `tree.reg` is 1e-6 and not the first plan's 1e-8. The map stays symmetric positive semidefinite and zero at $r = 0$, at the cost of one extra up-down pass.
 - **Cost** $O(Nw^3)$:
   - A, $w = 560$: milliseconds;
   - B, $w = 160\cdot6 = 960$;
   - A-reg, $w = 160\cdot28 = 4480$: about $3\times10^{12}$ flops and about 10 GB per pass, so it gets its own GPU.
-- **Unit test:** matches a dense solve of the assembled $S$ to relative error < 1e-10.
+- **Unit test:** matches a dense solve to relative error < 1e-10 on random systems. On the instance's own nearly singular $S$ it is judged by the system's residual, and the difference from dense is reported.
 
 ### 11.3 Compressed tree engine (shared by C-a and C-b) — proposal §12.3
 **Node model.**
@@ -741,6 +750,8 @@ $$P = \begin{bmatrix}T^{-1} & -K^\top\\ -K & \Sigma^{-1}\end{bmatrix}.$$
   4. Otherwise $\tau \leftarrow \beta\tau$ and repeat, up to `max_trials`.
   5. **Fallback:** $z^+ = T(z)$, the ordinary PDHG step. It is the K2 step with $\tau = 0$, so the scheme stays inside SuperMann's convergence framework.
 - **Initialize** $r_{\text{safe}} = \|R(z_0)\|_P$.
+- **Reuse.** A K1 step keeps $T(w)$, which the trial computed, as the next iterate: that is the K1 step followed by an ordinary round, with no extra work. A kept step (K1 or K2) starts a new restart average, because the old one averages points on another path.
+- **Where it runs.** Between scan blocks on the host, so a block is `tree.every` rounds when a tree is on. Diagnostics, restarts and the stop test still run every `rounds_per_scan` rounds. A tree pass counts one round for $T(z)$ and one per trial.
 - **Restarts** (§7.4) reset $r_{\text{safe}}$ and the trial counters.
 - **Before coding, check the conventions against Algorithm 2 of the paper.**
 
@@ -761,7 +772,7 @@ $$P = \begin{bmatrix}T^{-1} & -K^\top\\ -K & \Sigma^{-1}\end{bmatrix}.$$
 ### 12.1 Flow (proposal §8, without the local solver)
 1. **Load the config** and build or load `problem.npz` (§6). On build, run the validity checks (§5.4).
 2. **Initialize** state: zeros (cold start), or `--warm_start <run_dir>` for later replanning experiments.
-3. **Loop until the η stop (§10.5) fires.** Safety stops: `rounds_max` (50,000), `time_budget_s` (1,800 s), or `stalled` (neither $L_{\text{best}}$ nor the best $U_{\text{flow}}$ improves by more than 1e-6 relative over `stall_rounds` = 2,000 rounds). A safety stop marks the run as not converged. Each pass of the loop:
+3. **Loop until a stop (§10.5) fires.** Safety stops: `rounds_max` (50,000), `time_budget_s` (1,800 s), or `stalled` (neither $L_{\text{best}}$ nor the best $U_{\text{flow}}$ improves by more than 1e-6 relative over `stall_rounds` = 2,000 rounds). A safety stop marks the run as not converged. Each pass of the loop:
    - run one scan block of PDHG rounds (§7), with skipping (§9);
    - every `tree_every` rounds, if `tree.type != none`: a tree attempt (§11), then the safeguard;
    - every round (inside the scan): free certificate (§10.1); the running maximum is logged per block;
@@ -788,7 +799,7 @@ All unit tests from §5.4, §9.1, §9.2, §11.2, §11.3, §11.6 and §17 run on 
 
 ## 13. Extraction and rendering (`extract_render.py`) — proposal §6
 
-**Built so far:** method 1's top path, its guess file and its video. `--hand` sends the scripted true push through the same steps and checks the result against the true model's points, so a wrong video can be told apart from a wrong solve. The other three methods, `--methods`, the metrics table and the filmstrip come at M10.
+**Built so far:** all four methods, `--methods`, a guess file per path, and a video of each method's best paths (`--videos`, default 1). `--hand` sends the scripted true push through the same steps and checks the result against the true model's points, so a wrong video can be told apart from a wrong solve. The metrics table and the filmstrip come at M10.
 
 ### 13.1 Input
 A run directory (final state, or a chosen snapshot), plus `--methods all|<list>`.
@@ -796,12 +807,12 @@ A run directory (final state, or a chosen snapshot), plus `--methods all|<list>`
 ### 13.2 The four methods (all vectorized where possible)
 1. **Flow path decomposition (heaviest).** Repeatedly take the max-bottleneck start→goal path (a DP over layers with max-min), subtract the bottleneck, and stop when the flow left is < 1e-6. Keep the top `k_paths` (8) by weight.
 2. **Randomized rounding.** Sample `samples` (default 256) paths. At each vertex, choose the next edge with probability (edge flow) / (vertex outflow). Vectorize all samples as one batched categorical sampling per layer. Deduplicate and keep the best `k_paths` by relaxed cost.
-3. **Certificate shortest path + k-shortest.** On the certificate edge values (free LB, or exact if available), compute the $k$ best paths with a k-best DP on the DAG (top-$k$ lists per vertex).
+3. **Certificate shortest path + k-shortest.** On the certificate edge values (free LB, saved by the solve in `final_state.npz`, or exact if available), compute the $k$ best paths with a k-best DP on the DAG (top-$k$ lists per vertex).
 4. **Greedy.** From the start, follow the outgoing edge with the largest flow until the goal.
 
 ### 13.3 Initial guess along a path
 - **Methods 1, 2, 4:** knot states from first moments $z_e/y_e$. At an interior knot, average the incoming edge's post-knot and the outgoing edge's pre-knot (log the difference as a consistency violation). Forces from $f_n/y, f_t/y$.
-- **Method 3:** use each edge's pricing minimizer (first moments of the pricing solution), as in proposal §6 "Initialization".
+- **Method 3:** use each edge's pricing minimizer (first moments of the pricing solution), as in proposal §6 "Initialization": the edge's own conic program at $y = 1$ with the final state prices in its cost, through Clarabel on the CPU, since a path needs only a few of them.
 - **Rotation:** keep the raw $(c, s)$ for metrics. For rendering use $\theta = \operatorname{atan2}(s, c)$.
 
 ### 13.4 Metrics, written per guess to `extract/metrics.csv`
@@ -942,16 +953,22 @@ solver:
   theta_pd: auto            # per-config tuning (7.3): runs/tuned/<config>_<task>.yaml
   theta_psd: same           # same | <float>
   primal_weight_update: none   # none | pdlp
-  tune: {grid: [0.003, 0.01, 0.03, 0.1, 0.3, 1.0], rounds: 2000, score: kkt}
+  tune: {grid: [0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0], rounds: 2000, score: kkt}
   delta: 1.0e-4             # state tolerance of P_delta
-  stop: {eta_rel: 1.0e-3, eps_flow: 1.0e-6, eps_psd: 1.0e-8, eps_row: 1.0e-8}   # 10.5
+  stop:                     # 10.5
+    eta_rel: 0.07
+    eps_flow: 1.0e-3
+    eps_psd: 1.0e-3
+    eps_row: 1.0e-3
+    plateau: {gain: 0.01, window: 0.2, min_rounds: 500}
+    strict: {flow: 1.0e-6, psd: 1.0e-8, row: 1.0e-8}
   compile: {aot: true, cache_dir: ~/.cache/trellis_jax, fail_on_late_compile: true}
   dtype: float64
   qp_block: auto            # exact_ipm for kappa=1, split_rows for kappa>=2
   psd_proj: auto            # auto | eigh | lowrank | polar_ns (8.2)
   psd_lowrank: {p: 8, tol: 1.0e-6, exact_check_every: 50}   # basis size, residual for the fallback, rounds between exact-error logs (8.2)
   ipm: {iters: 40, tol: 1.0e-11}
-  restarts: {scheme: pdlp_kkt, beta_sufficient: 0.2, beta_necessary: 0.8}
+  restarts: {scheme: pdlp_kkt, beta_sufficient: 0.2, beta_necessary: 0.8, beta_artificial: 0.36}
   checkpoint_every: 2000
 skipping:
   zero_test: true
@@ -962,7 +979,9 @@ skipping:
 tree:
   type: exact               # none | exact | lowrank_a | lowrank_b
   every: 10
-  reg: 1.0e-8
+  reg: 1.0e-6
+  floor: 1.0e-4            # a row responding under this fraction of its unconstrained response stays put (11.1)
+  filter: true              # solve twice, so that redundant rows cannot blow up the step (11.2)
   rank: 16
   jacobian: one_step        # one_step | frozen_rank (11.1)
   eig_tol: 1.0e-8           # frozen_rank only
@@ -982,6 +1001,7 @@ tree:
     relax: 1.0
     beta: 0.5
     max_trials: 3
+    d_max: 1.0e+6
     hpe: {sigma: 0.9, lambda_min: 0.1}
 certificate:
   free_every: 1             # rounds
@@ -1035,10 +1055,10 @@ Seed 0 only.
 | M0 | Model and graph | Sign conventions unit-tested. Mode graph matches §4.4. Pruning removes only infeasible or unreachable edges. A hand-scripted feasible push (forward-simulated with the true model) is a valid start→goal path; record its cost $J_{\text{hand}}$. Benchmarks recorded: batched `eigh` sizes (§8.2), per-round time vs E, kernels and syncs per round (§15.5). Ahead-of-time compile covers every variant; a timing-mode dry run reports zero late compiles. *(The per-round measurements and the dry run need the PDHG round, so they are recorded at M3; M0 records the `eigh` benchmark.)* **Batching (§0):** every round primitive is timed at two batch sizes against its roofline, with a verdict. `--bench_psd` covers the PSD projection per round at orders 1–3: exact `eigh` against the low-rank tracker, with accuracy checked against an exact projection. `--bench_linalg` covers Cholesky and triangular solves at the IPM and tree sizes, the merge `eigh` and orthonormalization of the low-rank tree, and the coupling scatter/gather. Every primitive a milestone uses must be judged batched before that milestone starts. |
 | M1 | Outer models | §5.4 validity: 0 violations over $10^4$ samples per edge type (SDP κ = 1, 2; A-reg; Taylor with bands, McCormick and SOC costs), and $200$ per edge type at κ = 3. Negative controls flag broken samples, and lifted rows reproduce their polynomials at random points. Coupled coordinates agree and costs sum to $J_{\text{hand}}$ along the hand push. Every true step has an allowed region copy. Linear elimination (§5.1.7) leaves the model unchanged, checked algebraically at κ = 1 and on sampled types at κ = 2: same cost, coupling, equalities, PSD blocks and box, and at κ = 1 the same dimension with every full inequality implied. Band report and sizing table printed, and the per-group size table of §5.1.7 printed. |
 | M2 | Reference solve | `--selftest`, in seconds: each solver's PSD convention passes a known-answer test, and every assembled program holds the hand push at cost $J_{\text{hand}}$, with a dropped step flagged. `--run ref_tiny --reference`, once: Clarabel solves $P_\delta$ on the tiny T1 instance and saves $J_{\text{rel}}$ (§10.4), with $J_{\text{rel}} \le J_{\text{hand}}$. `--survey`, optional and not part of acceptance: the tightness table and the numeric cross-checks. |
-| M3 | PDHG, run D | On the small instance, the objective reaches within 1e-4 relative of $J_{\text{rel}}$. Every logged $L$ is ≤ $J_{\text{rel}}$ (+ eps). Restarts fire and reduce the KKT error. Stopping test (§10.5): when it fires, $L_{\text{best}} \le J_{\text{rel}} \le U_{\text{flow}}$ within tolerance and the gap is ≤ η. Also: the operators' adjoints and step-scaled norm; the batched edge QP against Clarabel; the GPU arrays hold the hand push; the free bound stays below $J_{\text{hand}}$ and $J_{\text{rel}}$ for random prices and multipliers. |
+| M3 | PDHG, run D | On the small instance, a stop of §10.5 fires, with $L$ valid and within 15 % of $J_{\text{rel}}$. Every logged $L$ is ≤ $J_{\text{rel}}$ (+ eps). Restarts fire and reduce the KKT error. Also: the operators' adjoints and step-scaled norm; the batched edge QP against Clarabel (objective within 1e-8, feasibility within 1e-9, $x$ within 1e-4, since a gap tolerance of 1e-10 pins $x$ only to about its square root); the GPU arrays hold the hand push; the free bound stays below $J_{\text{hand}}$ and $J_{\text{rel}}$ for random prices and multipliers. **A loose stop can't show that $L$ converges to $J_{\text{rel}}$ rather than below it.** One long run with a tighter stop shows that, once the rounds are fast enough; on the first run $L$ was 7.4 % below and rising at round 19,400. |
 | M4 | Edge identities | §9.1 tests pass (LB equals the pricing value at optimal duals; random duals give a valid bound; "zero ⇔ π ≥ 0" on 1,000 edges). Face cache output matches the IPM to 1e-10. The free bound with projected PSD duals never exceeds Clarabel's $\pi_e$ on 1,000 random edges and prices. |
 | M5 | Skipping | A vs A-noskip on the small instance: iterates agree to 1e-9 at every logged round (tolerance is the IPM's, not exact). Counts are logged. Bucketed compaction gives the same iterates as `compaction: none`. The frozen-edge PSD skip (§9.1) gives the same iterates as running every projection. |
-| M6 | Exact tree and safeguard | Cyclic reduction equals a dense solve (1e-10). The one-step Jacobian matches finite differences of the edge prox (same active set). The frozen-rank option is checked the same way at fixed rank. SuperMann: K2 steps never increase $\mathrm{dist}_P$ to a reference solution on the small instance (Fejér check). A fallback equals the plain PDHG step bit for bit. HPE with $d = 0$ reproduces PDHG. On a frozen-face linear test problem, one accepted tree step reduces the residual by ≥ 100×. |
+| M6 | Exact tree and safeguard | Cyclic reduction equals a dense solve (1e-10) on random systems, and solves the instance's own $S$ to a residual of 1e-10. The edge response matches finite differences of the edge prox (same active set): median relative error ≤ 1e-2, 90th percentile ≤ 0.1, since an IPM pins a narrow coordinate only to about the square root of its tolerance. A zero residual gives exactly zero correction. A fallback equals the plain PDHG step to rounding. A round is firmly nonexpansive in the metric on random pairs of states: this is the property behind the Fejér check on K2 steps, and it needs no saved solution. On a frozen-face linear test problem, one tree step reduces the row residual by ≥ 100×. A tree solve on the small instance reaches a stop with $L$ valid and within 15 % of $J_{\text{rel}}$. *Later:* the frozen-rank option and HPE, which this milestone does not build. |
 | M7 | Compressed engine | Merge identity $(R+VV^\top)/m = R/m + XC^{-1}X^\top$ checked densely. Without truncation it equals the uncompressed solve. With truncation, the tree map (applied to unit vectors) is symmetric positive definite. Zero right-hand side gives exactly zero; at a PDHG fixed point $r = 0$ gives $\Delta p = 0$. The Kronecker reference Schur complement matches a dense computation. |
 | M8 | C-a, C-b | Both converge (the safeguard holds). C-b: `assert` that $L$ is written only by §10. Trial pairs are clean (same centers; checked by recomputing one pair at fixed center). The positive SR1 fit reproduces stored pairs when the rank allows. The C-a base and correction are PSD. All Section 12 counters and timers are present, and the activation counter works on a hand case. |
 | M9 | Certificate | Lazy $L$ equals full-exact $L$ (to 1e-9) whenever both are computed. B&B never lowers $L$. Signed slack is applied. |

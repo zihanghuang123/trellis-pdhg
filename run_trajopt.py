@@ -1,17 +1,23 @@
-"""PDHG solver for the planar-pushing trellis (plan sections 7-12). So far: the M0 benchmarks of the GPU primitives a round will use, each checked for true batching (plan section 0); the solver sections follow from M3.
+"""PDHG solver for the planar-pushing trellis (plan sections 7-12): the plain PDHG round at order 1, its certificate and stopping test (M3), and the benchmarks of the GPU primitives a round uses, each checked for true batching (plan section 0). Skipping and trees follow from M5.
 
-    python run_trajopt.py --bench_psd       # PSD projection per round, orders 1-3: exact eigh vs low-rank tracking
-    python run_trajopt.py --bench_linalg    # Cholesky/triangular solves, tree-merge pieces, coupling scatter/gather
-    python run_trajopt.py --bench_eigh      # the original M0 eigh scaling test
+    python run_trajopt.py --selftest                 # milestone M3, on the tiny instance
+    python run_trajopt.py --run D --task T3_translate_rotate   # solve one run, building its problem.npz if needed
+    python run_trajopt.py --bench_chol               # Cholesky at the edge QP's real sizes: library vs hand-written
+    python run_trajopt.py --bench_psd                # PSD projection per round, orders 1-3: exact eigh vs low-rank tracking
+    python run_trajopt.py --bench_linalg             # Cholesky/triangular solves, tree-merge pieces, coupling scatter/gather
+    python run_trajopt.py --bench_eigh               # the original M0 eigh scaling test
 """
 import argparse
 import copy
+import hashlib
 import json
+import math
 import os
 import platform
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -327,6 +333,67 @@ def bench_linalg(cfg):
     save_bench(cfg, "linalg.json", rows, verdicts)
 
 
+def small_cholesky(a):
+    """Cholesky factors of a batch of small matrices as straight-line elementwise code, with no library call: {(row, column): values}. The compiler can fuse it into few kernels, which avoids the library call's fixed overhead."""
+    n = a.shape[-1]
+    factor = {}
+    for j in range(n):
+        d = a[..., j, j]
+        for k in range(j):
+            d = d - factor[j, k] * factor[j, k]
+        root = jnp.sqrt(d)
+        factor[j, j] = root
+        for i in range(j + 1, n):
+            v = a[..., i, j]
+            for k in range(j):
+                v = v - factor[i, k] * factor[j, k]
+            factor[i, j] = v / root
+    return factor
+
+
+def small_cholesky_solve(factor, b):
+    """Solves L L^T x = b, for factors from small_cholesky and b (..., n), as straight-line elementwise code."""
+    n = b.shape[-1]
+    y = {}
+    for i in range(n):
+        v = b[..., i]
+        for k in range(i):
+            v = v - factor[i, k] * y[k]
+        y[i] = v / factor[i, i]
+    x = {}
+    for i in range(n - 1, -1, -1):
+        v = y[i]
+        for k in range(i + 1, n):
+            v = v - factor[k, i] * x[k]
+        x[i] = v / factor[i, i]
+    return jnp.stack([x[i] for i in range(n)], axis=-1)
+
+
+def bench_chol(cfg):
+    """Cholesky with one solve at the edge QP's real system sizes (plan 8.1): the library kernels against the hand-written straight-line code, at the two batch sizes of the verdict rule. Both are checked against the right-hand side."""
+    sc, bc = cfg["bench"]["small_cholesky"], cfg["bench"]
+    rows = []
+    run = make_runner(rows, float(bc["peak_tflops_fp64"]) * 1e12, float(bc["peak_bandwidth_gbs"]) * 1e9, int(sc.get("repeats", 5)))
+    for n in sc["sizes"]:
+        for batch in sc["batches"]:
+            n, batch = int(n), int(batch)
+            k1, k2 = jax.random.split(jax.random.PRNGKey(17 * n + batch))
+            g = jax.random.normal(k1, (batch, n, n))
+            a = g @ swap(g) / n + jnp.eye(n)
+            b = jax.random.normal(k2, (batch, n))
+
+            def residual(out, a=a, b=b):
+                return dict(residual=float(jnp.max(jnp.abs(jnp.einsum("bij,bj->bi", a, out) - b))))
+
+            flops = n ** 3 / 3 + 2 * n ** 2
+            run("small", "library", n, batch, lambda a, b: chol_solve(a, b[..., None])[..., 0], (a, b), flops, residual, traffic=20 * n * n + 32 * n)
+            run("small", "hand_written", n, batch, lambda a, b: small_cholesky_solve(small_cholesky(a), b), (a, b), flops, residual, traffic=20 * n * n + 32 * n)
+            del a, b, g
+    verdicts = batching_verdicts(rows)
+    print_verdicts(verdicts)
+    save_bench(cfg, "chol.json", rows, verdicts)
+
+
 def batching_verdicts(rows):
     """Per primitive and size: per-item time at the largest batch over the smallest (falls when batching helps), the shares of the FLOP and memory-bandwidth rooflines, and a verdict.
 
@@ -409,38 +476,803 @@ def bench_eigh(cfg):
     print(f"saved {out}", flush=True)
 
 
+# ===== PROBLEM =====
+# The solver reads problem.npz from push_model.py --build, in a separate process, because that script
+# forks CPU workers and a fork does not mix with JAX. One padded batch holds all edges (plan 6.2 allows
+# a single bucket): a round this small is bound by kernel launches, not arithmetic, so every extra
+# bucket would cost more than the padding does. A padded entry of m has no rows and stays at zero.
+
+def run_dir(cfg):
+    return ROOT / cfg["output"]["root"] / cfg["run_name"] / cfg["task"] / str(cfg["seed"])
+
+
+def reference_fingerprint(cfg):
+    """A hash of everything the problem and J_rel depend on in the config; the same function as in push_model.py."""
+    payload = {k: cfg[k] for k in ("model", "trellis", "relaxation", "costs", "task", "tasks", "task_common")}
+    payload["delta"] = cfg["solver"]["delta"]
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def ensure_problem(cfg, run, task, sets):
+    """Loads the run's problem.npz, first building it when it is missing or came from another config (plan 12.1). The build runs the validity checks of plan 5.4 and stops on a violation."""
+    path = run_dir(cfg) / "problem.npz"
+    fresh = False
+    if path.exists():
+        with np.load(path) as z:
+            fresh = json.loads(str(z["meta"])).get("fingerprint") == reference_fingerprint(cfg)
+    if not fresh:
+        cmd = [sys.executable, str(ROOT / "push_model.py"), "--build"] + (["--run", run] if run else []) + (["--task", task] if task else [])
+        for s in sets:
+            cmd += ["--set", s]
+        print(f"building {path}", flush=True)
+        subprocess.run(cmd, check=True)
+    with np.load(path) as z:
+        return {k: z[k] for k in z.files}
+
+
+def build_data(prob, cfg):
+    """The solver's arrays over all alive edges, as (arrays for the GPU, plain facts about them). Step sizes are Pock-Chambolle with alpha = 1 and the 0.99 factor (plan 7.3); they are stored for theta = 1, so T scales with theta and Sigma with 1 / theta."""
+    meta = json.loads(str(prob["meta"]))
+    if str(prob["rel_kind"]) != "sdp" or int(meta["relaxation"]["order"]) != 1 or not meta["relaxation"]["eliminate_linear"]:
+        raise NotImplementedError("the solver covers the reduced moment relaxation at order 1 so far")
+    rho, root2 = 0.99, math.sqrt(2.0)
+    alive = np.flatnonzero(prob["edge_alive"])
+    etype = prob["edge_type"][alive]
+    used = np.unique(etype)
+    rel_n, nt = prob["rel_n"], prob["rel_n"].size
+    n, q = int(rel_n[used].max()), int(prob["rel_q"])
+    k_eq, k_ge = prob["rel_eq_rows"], prob["rel_ge_rows"]
+    r = max(1, int((k_eq + k_ge)[used].max()))
+    sizes = {int(nv): int(prob[f"rel_moment_{int(nv)}_size"]) for nv in np.unique(prob["rel_nv"][used])}
+    s = max(sizes.values())
+
+    # per edge type: rows [equalities, inequalities, padding], box, cost, moment matrix map
+    R_t, eq_t, ge_t = np.zeros((nt, r, n)), np.zeros((nt, r)), np.zeros((nt, r))
+    for key, offset in (("eq", np.zeros(nt, np.int64)), ("ge", k_eq)):
+        t = prob[f"rel_{key}_type"]
+        keep = np.isin(t, used)
+        t = t[keep]
+        R_t[t, prob[f"rel_{key}_row"][keep] + offset[t], prob[f"rel_{key}_col"][keep]] = prob[f"rel_{key}_val"][keep]
+    lo_t, hi_t, c_t = prob["rel_lo"][:, :n].copy(), prob["rel_hi"][:, :n].copy(), prob["rel_c"][:, :n].copy()
+    open_t, col_t = np.zeros((nt, n)), np.zeros((nt, n))
+    mat_t, mask_t = np.zeros((nt, s, s), np.int64), np.zeros((nt, s, s))
+    adj_t, adj_w_t, trace_t = np.zeros((nt, n), np.int64), np.zeros((nt, n)), np.zeros(nt)
+    for t in used:
+        eq_t[t, :k_eq[t]] = 1.0
+        ge_t[t, k_eq[t]:k_eq[t] + k_ge[t]] = 1.0
+        nt_entries = int(rel_n[t])
+        if not np.all(lo_t[t, 1:nt_entries] < hi_t[t, 1:nt_entries]):
+            raise NotImplementedError(f"edge type {t} has an entry with a zero-width interval, which the edge QP does not handle yet")
+        open_t[t, 1:nt_entries] = 1.0
+        nv = int(prob["rel_nv"][t])
+        row, col, mom = prob[f"rel_moment_{nv}_row"], prob[f"rel_moment_{nv}_col"], prob[f"rel_moment_{nv}_mom"]
+        if np.unique(mom).size != mom.size:
+            raise NotImplementedError("a moment appears twice in the moment matrix, which only happens above order 1")
+        mat_t[t, row, col] = mom
+        mat_t[t, col, row] = mom
+        mask_t[t, :sizes[nv], :sizes[nv]] = 1.0
+        adj_t[t, mom] = row.astype(np.int64) * s + col      # B*(Lam)[k] = sum of Lam over the entries that read m[k]
+        adj_w_t[t, mom] = np.where(row == col, 1.0, 2.0)
+        col_t[t, mom] += np.where(row == col, 1.0, root2)   # svec rows: sqrt(2) on off-diagonals (plan 7.3)
+        trace_t[t] = hi_t[t, mom[row == col]].sum()
+
+    def coupling(key):
+        """Each coupled coordinate of an edge type as coef * m[idx]; substitution of single-variable equalities leaves one term per coordinate."""
+        t = prob[f"rel_{key}_type"]
+        keep = np.isin(t, used)
+        t, i = t[keep], prob[f"rel_{key}_row"][keep]
+        if np.unique(t.astype(np.int64) * q + i).size != t.size:
+            raise NotImplementedError("a coupled coordinate has more than one term")
+        idx, coef = np.zeros((nt, q), np.int64), np.zeros((nt, q))
+        idx[t, i], coef[t, i] = prob[f"rel_{key}_col"][keep], prob[f"rel_{key}_val"][keep]
+        return idx, coef
+
+    tail_idx_t, tail_coef_t = coupling("tail")
+    head_idx_t, head_coef_t = coupling("head")
+
+    # per edge
+    E = alive.size
+    tails, heads = prob["edge_tail"][alive], prob["edge_head"][alive]
+    src, dst = int(prob["s"]), int(prob["t"])
+    verts = np.unique(np.r_[tails, heads])
+    V = verts.size
+    vpos = np.full(int(prob["edge_tail"].max() + prob["edge_head"].max() + 2), -1, np.int64)
+    vpos[verts] = np.arange(V)
+    tail_idx, head_idx = tail_idx_t[etype], head_idx_t[etype]
+    tail_coef, head_coef = tail_coef_t[etype].copy(), head_coef_t[etype].copy()
+    tail_coef[tails == src, 1:] = 0.0                       # the start and goal keep only their flow row
+    head_coef[heads == dst, 1:] = 0.0
+    edge = np.arange(E)[:, None]
+    head_rows, tail_rows = vpos[heads][:, None] * q + np.arange(q), vpos[tails][:, None] * q + np.arange(q)
+    colsum = col_t[etype].copy()
+    np.add.at(colsum, (np.broadcast_to(edge, tail_idx.shape), tail_idx), np.abs(tail_coef))
+    np.add.at(colsum, (np.broadcast_to(edge, head_idx.shape), head_idx), np.abs(head_coef))
+    rowsum = np.zeros(V * q)
+    np.add.at(rowsum, head_rows.ravel(), np.abs(head_coef).ravel())
+    np.add.at(rowsum, tail_rows.ravel(), np.abs(tail_coef).ravel())
+    b = np.zeros((V, q))
+    b[vpos[src], 0], b[vpos[dst], 0] = -1.0, 1.0
+    is_flow = np.zeros((1, q), bool)
+    is_flow[0, 0] = True
+    weight = np.full((s, s), root2)
+    np.fill_diagonal(weight, 1.0)
+    layer = prob["edge_layer"][alive]
+    layers = [(np.flatnonzero(layer == k), vpos[tails[layer == k]], vpos[heads[layer == k]]) for k in np.unique(layer)]
+    dist0 = np.full(V, np.inf)
+    dist0[vpos[src]] = 0.0
+    e0 = np.zeros(n)
+    e0[0] = 1.0
+    R = R_t[etype]
+    Rw = R.copy()
+    Rw[:, :, 0] = 0.0
+    eq, ge = eq_t[etype], ge_t[etype]
+    op = open_t[etype]
+    arrays = dict(
+        c=c_t[etype], lo=lo_t[etype], hi=hi_t[etype], open=op, R=R, Rw=Rw, Ry=R[:, :, 0], row_eq=eq, row_ge=ge, row_pad=1.0 - eq - ge,
+        n_ineq=np.sum(ge, axis=1) + 2.0 * np.sum(op, axis=1), e0=e0, wm=1.0 - e0, tail_idx=tail_idx, tail_coef=tail_coef, head_idx=head_idx, head_coef=head_coef,
+        head_rows=head_rows, tail_rows=tail_rows, k_rows=np.r_[head_rows.ravel(), tail_rows.ravel()],
+        k_cols=np.r_[(edge * n + head_idx).ravel(), (edge * n + tail_idx).ravel()],
+        mat=mat_t[etype], psd_mask=mask_t[etype], adj=adj_t[etype], adj_w=adj_w_t[etype], trace_hi=trace_t[etype],
+        T=np.where(colsum > 0.0, rho / np.where(colsum > 0.0, colsum, 1.0), 1.0), t_s=np.asarray(rho),
+        sig_p=np.where(rowsum > 0.0, rho / np.where(rowsum > 0.0, rowsum, 1.0), 0.0).reshape(V, q),
+        sig_l=mask_t[etype] * rho / (weight + 1.0), b=b, is_flow=is_flow, state_mask=1.0 - is_flow.astype(float), delta=np.asarray(float(cfg["solver"]["delta"])),
+        layers=layers, dist0=dist0, goal=np.asarray(vpos[dst]), eps_cert=np.asarray(float(cfg["certificate"]["eps_cert"])))
+    info = dict(E=int(E), V=int(V), q=q, n=n, r=r, s=s, alive=alive, types=int(used.size), meta=meta)
+    return jax.tree_util.tree_map(jnp.asarray, arrays), info
+
+
+def k_forward(d, m):
+    """K m per vertex and coordinate (V, q): head +, tail - (plan 18)."""
+    head = d["head_coef"] * jnp.take_along_axis(m, d["head_idx"], axis=1)
+    tail = d["tail_coef"] * jnp.take_along_axis(m, d["tail_idx"], axis=1)
+    return jax.ops.segment_sum(jnp.concatenate([head.ravel(), -tail.ravel()]), d["k_rows"], num_segments=d["b"].size).reshape(d["b"].shape)
+
+
+def k_adjoint(d, p):
+    """K^T p per edge (E, n)."""
+    flat = p.ravel()
+    head, tail = d["head_coef"] * flat[d["head_rows"]], d["tail_coef"] * flat[d["tail_rows"]]
+    return jax.ops.segment_sum(jnp.concatenate([head.ravel(), -tail.ravel()]), d["k_cols"], num_segments=d["c"].size).reshape(d["c"].shape)
+
+
+def psd_forward(d, m):
+    """The moment matrices B(m) (E, s, s)."""
+    return jnp.take_along_axis(m, d["mat"].reshape(m.shape[0], -1), axis=1).reshape(d["mat"].shape) * d["psd_mask"]
+
+
+def psd_adjoint(d, lam):
+    """B*(Lam) (E, n), with <Lam, B(m)> the Frobenius product."""
+    return jnp.take_along_axis(lam.reshape(lam.shape[0], -1), d["adj"], axis=1) * d["adj_w"]
+
+
+# ===== EDGE_SOLVERS: EDGE QP =====
+# Plan 8.1. Each edge step projects a point onto its polyhedral cone in a diagonal metric:
+#   min 1/2 x^T diag(h) x + f^T x  over  R_eq x = 0, R_ge x >= 0, lo_i y <= x_i <= hi_i y,  with y = x[0].
+# A batched Mehrotra predictor-corrector in the row form. The two-sided bounds stay diagonal in x_i and
+# couple only through y, so H = diag(h) + (bound terms) is an arrow matrix with a closed-form inverse,
+# and the only factorization is S = R H^-1 R^T + (diagonal), of the few rows after linear elimination.
+# y <= 1 is left out: flow conservation implies it at the solution (tex 2.2).
+# Multipliers follow the certificate's sign: stationarity is h x + f - R^T u - (bound terms) = 0, with
+# u free on equalities and u >= 0 on inequalities, so u goes straight into the free bound.
+
+def mv(a, x):
+    return jnp.einsum("ern,en->er", a, x)
+
+
+def mtv(a, u):
+    return jnp.einsum("ern,er->en", a, u)
+
+
+def spd_factor(s, method):
+    return small_cholesky(s) if method == "small" else jax.lax.linalg.cholesky(s, symmetrize_input=False)
+
+
+def spd_solve(factor, b, method):
+    if method == "small":
+        return small_cholesky_solve(factor, b)
+    y = jax.lax.linalg.triangular_solve(factor, b[..., None], left_side=True, lower=True)
+    return jax.lax.linalg.triangular_solve(factor, y, left_side=True, lower=True, transpose_a=True)[..., 0]
+
+
+SLACKS = ("sg", "zg", "sl", "zl", "su", "zu")
+
+
+def edge_qp(d, h, f, ipm):
+    """The step of every edge: (x (E, n), row multipliers u (E, r), stats). An edge that has converged stops moving while the others finish."""
+    R, Rw, Ry = d["R"], d["Rw"], d["Ry"]
+    eqf, gef, padf, op, lo, hi, e0, wm, n_ineq = d["row_eq"], d["row_ge"], d["row_pad"], d["open"], d["lo"], d["hi"], d["e0"], d["wm"], d["n_ineq"]
+    method, tol = ipm["cholesky"], float(ipm["tol"])
+    fnorm = 1.0 + jnp.max(jnp.abs(f), axis=1)
+    diag_mask = jnp.eye(R.shape[1])
+
+    def residuals(v):
+        y = v["x"][:, :1]
+        rx = mv(R, v["x"])
+        cb = v["zl"] - v["zu"] + e0 * jnp.sum(hi * v["zu"] - lo * v["zl"], axis=1, keepdims=True)
+        rd = h * v["x"] + f - mtv(R, eqf * v["nu"] + gef * v["zg"]) - cb
+        ra, rg = eqf * rx, gef * (rx - v["sg"])
+        rl, ru = op * (v["x"] - lo * y - v["sl"]), op * (hi * y - v["x"] - v["su"])
+        mu = (jnp.sum(gef * v["sg"] * v["zg"], axis=1) + jnp.sum(v["sl"] * v["zl"] + v["su"] * v["zu"], axis=1)) / n_ineq
+        prim = jnp.maximum(jnp.max(jnp.abs(ra) + jnp.abs(rg), axis=1), jnp.max(jnp.maximum(jnp.abs(rl), jnp.abs(ru)), axis=1))
+        return rd, ra, rg, rl, ru, mu, jnp.maximum(jnp.max(jnp.abs(rd), axis=1) / fnorm, jnp.maximum(prim, mu))
+
+    def to_boundary(v, dv):
+        steps = [jnp.min(jnp.where(dv[k] < 0.0, -v[k] / dv[k], jnp.inf), axis=1) for k in SLACKS]
+        return jnp.min(jnp.stack(steps), axis=0)
+
+    def body(v):
+        rd, ra, rg, rl, ru, mu, metric = residuals(v)
+        sg, zg, sl, zl, su, zu = (v[k] for k in SLACKS)
+        zg_safe = zg + (1.0 - gef)
+        dl, du = zl / sl, zu / su
+        dw = h + dl + du
+        a = -(lo * dl + hi * du)
+        e = a / dw
+        sigma = h[:, 0] + jnp.sum((h * (lo * lo * dl + hi * hi * du) + dl * du * (hi - lo) ** 2) / dw, axis=1)
+        t = Ry - mv(Rw, e)
+        s = jnp.einsum("ern,esn->ers", Rw / dw[:, None, :], Rw) + t[:, :, None] * t[:, None, :] / sigma[:, None, None]
+        s = s + diag_mask * (gef * sg / zg_safe + padf + 1e-14 * eqf)[:, None, :]
+        factor = spd_factor(s, method)
+
+        def hb(w):
+            """Applies the inverse of the arrow matrix H."""
+            uw = wm * w / dw
+            dy = (w[:, 0] - jnp.sum(a * uw, axis=1)) / sigma
+            return uw - e * dy[:, None] + e0 * dy[:, None]
+
+        def direction(rmg, rml, rmu):
+            tl, tu = dl * rl + rml / sl, du * ru + rmu / su
+            rhs = -rd - (tl - tu) - e0 * jnp.sum(hi * tu - lo * tl, axis=1, keepdims=True)
+            step = spd_solve(factor, -ra - rg - gef * rmg / zg_safe - mv(R, hb(rhs)), method)
+            dx = hb(rhs + mtv(R, (eqf + gef) * step))
+            dy = dx[:, :1]
+            dsl, dsu = op * (dx - lo * dy + rl), op * (hi * dy - dx + ru)
+            return dict(x=dx, nu=eqf * step, sg=gef * (mv(R, dx) + rg), zg=gef * step, sl=dsl, zl=op * (-rml - zl * dsl) / sl,
+                        su=dsu, zu=op * (-rmu - zu * dsu) / su)
+
+        rmg, rml, rmu = gef * sg * zg, sl * zl, su * zu
+        affine = direction(rmg, rml, rmu)
+        a_aff = jnp.minimum(1.0, to_boundary(v, affine))[:, None]
+        mu_aff = (jnp.sum(gef * (sg + a_aff * affine["sg"]) * (zg + a_aff * affine["zg"]), axis=1)
+                  + jnp.sum((sl + a_aff * affine["sl"]) * (zl + a_aff * affine["zl"]) + (su + a_aff * affine["su"]) * (zu + a_aff * affine["zu"]), axis=1)) / n_ineq
+        center = (jnp.minimum(1.0, mu_aff / jnp.maximum(mu, 1e-300)) ** 3 * mu)[:, None]
+        full = direction(rmg + gef * (affine["sg"] * affine["zg"] - center), rml + affine["sl"] * affine["zl"] - op * center,
+                         rmu + affine["su"] * affine["zu"] - op * center)
+        alpha = jnp.minimum(1.0, 0.995 * to_boundary(v, full))
+        sane = jnp.all(jnp.isfinite(full["x"]), axis=1) & jnp.all(jnp.isfinite(full["nu"]), axis=1) & jnp.all(jnp.isfinite(full["zg"]), axis=1)
+        move = jnp.where((metric > tol) & sane, alpha, 0.0)
+        new = {k: v[k] + move[:, None] * jnp.where(jnp.isfinite(full[k]), full[k], 0.0) for k in full}
+        new.update(it=v["it"] + 1, active=(metric > tol) & sane)
+        return new
+
+    x0 = 0.5 * (lo + hi) * op + e0
+    half = jnp.where(op > 0.0, 0.5 * (hi - lo), 1.0)
+    mu0 = jnp.maximum(jnp.max(jnp.abs(h * x0 + f) * 2.0 * half, axis=1, keepdims=True), 1e-2)
+    rx0 = mv(R, x0)
+    sg0 = gef * jnp.maximum(rx0, 0.1 * (1.0 + jnp.abs(rx0))) + (1.0 - gef)
+    v = dict(x=x0, nu=jnp.zeros_like(rx0), sg=sg0, zg=gef * mu0 / sg0, sl=half, zl=op * mu0 / half, su=half, zu=op * mu0 / half,
+             it=jnp.zeros((), jnp.int64), active=jnp.ones(R.shape[0], bool))
+    iters = int(ipm["iters"])
+    if ipm["adaptive"]:
+        v = jax.lax.while_loop(lambda c: (c["it"] < iters) & jnp.any(c["active"]), body, v)
+    else:
+        v = jax.lax.fori_loop(0, iters, lambda _, c: body(c), v)
+    metric = residuals(v)[-1]
+    x = jnp.where(jnp.all(jnp.abs(v["x"]) < 1e-13, axis=1, keepdims=True), 0.0, v["x"])
+    return x, eqf * v["nu"] + gef * v["zg"], dict(ipm_res=jnp.max(metric), ipm_it=v["it"])
+
+
+# ===== CERTIFICATE =====
+# Plan 10.1, tex Thm 5.5. A valid bound for any state prices and any multipliers in their cones. On an
+# edge, with m_0 = 1 and feasible m: g^T m >= r^T m for r = g - R^T u - B*(Gamma), since R_eq m = 0,
+# u_ge >= 0 with R_ge m >= 0, and Gamma >= 0 with B(m) >= 0. The box then bounds r^T m from below.
+# Gamma is the negative part of the matrix the PSD step just decomposed, divided by its step. The plan
+# says Pi(-Lam): any PSD matrix is valid, this one tends to -Lam at convergence, and it needs no second
+# eigendecomposition. Flow prices are left out, since they cancel along a start-goal path.
+
+def free_bound(d, p, u, gamma):
+    """(L_0, L_delta): the shortest path over edge bounds, without and with the delta term. Each edge bound carries its signed floating-point slack (tex Prop 5.7)."""
+    lam = p * d["state_mask"]
+    r = d["c"] + k_adjoint(d, lam) - mtv(d["R"], u) - psd_adjoint(d, gamma)
+    terms = jnp.minimum(r * d["lo"], r * d["hi"]) * d["wm"]
+    slack = d["eps_cert"] * (1.0 + jnp.abs(r[:, 0]) + jnp.sum(jnp.abs(terms), axis=1) + jnp.sqrt(jnp.sum(gamma * gamma, axis=(1, 2))) * d["trace_hi"])
+    lb = r[:, 0] + jnp.sum(terms, axis=1) - slack
+    dist = d["dist0"]
+    for idx, tails, heads in d["layers"]:
+        dist = jnp.minimum(dist, jax.ops.segment_min(dist[tails] + lb[idx], heads, num_segments=dist.size))
+    l0 = dist[d["goal"]]
+    return l0, l0 - d["delta"] * jnp.sum(jnp.abs(lam))
+
+
 # ===== PDHG =====
-# Milestone M3 (plan section 7).
+# Plan 7. One round is Chambolle-Pock on the saddle problem with the Lagrangian term <Lam, B(m) - S>
+# and <p, K m - b>. At a solution -Lam is PSD. theta is the primal/dual balance: T scales with it and
+# Sigma with its inverse, so it is a value in the state and changing it needs no recompile.
+
+def scalar(x):
+    return jnp.asarray(x, dtype=jnp.float64)
+
+
+def pdhg_step(d, z, theta, ipm):
+    """One round from z = (m, S, Lam, p): (next z, the multipliers and stats of the round)."""
+    t = d["T"] * theta
+    t_s = d["t_s"] * theta
+    sig_p, sig_l = d["sig_p"] / theta, d["sig_l"] / theta
+    g = d["c"] + k_adjoint(d, z["p"]) + psd_adjoint(d, z["Lam"])
+    m, u, stats = edge_qp(d, 1.0 / t, g - z["m"] / t, ipm)
+    x = z["S"] + t_s * z["Lam"]
+    w, vec = jnp.linalg.eigh(x)
+    s = (vec * jnp.maximum(w, 0.0)[:, None, :]) @ swap(vec)
+    m_bar = 2.0 * m - z["m"]
+    moved = z["p"] + sig_p * (k_forward(d, m_bar) - d["b"])
+    p = jnp.where(d["is_flow"], moved, jnp.sign(moved) * jnp.maximum(jnp.abs(moved) - sig_p * d["delta"], 0.0))
+    lam = z["Lam"] + sig_l * (psd_forward(d, m_bar) - (2.0 * s - z["S"]))
+    return dict(m=m, S=s, Lam=lam, p=p), dict(u=u, gamma=(s - x) / t_s, **stats)
+
+
+def fixed_point_residual(d, z, theta, ipm):
+    """||z - T(z)||_P: the KKT error used for restarts (plan 7.4). It is zero exactly at a saddle point, and it needs no projection onto the normal cones of the edge polytopes."""
+    next_z, _ = pdhg_step(d, z, theta, ipm)
+    dm, ds, dl, dp = z["m"] - next_z["m"], z["S"] - next_z["S"], z["Lam"] - next_z["Lam"], z["p"] - next_z["p"]
+    t = d["T"] * theta
+    sig_p, sig_l = d["sig_p"] / theta, d["sig_l"] / theta
+    primal = jnp.sum(dm * dm / t) + jnp.sum(ds * ds) / (d["t_s"] * theta)
+    dual = jnp.sum(jnp.where(sig_p > 0.0, dp * dp / jnp.where(sig_p > 0.0, sig_p, 1.0), 0.0)) + jnp.sum(jnp.where(sig_l > 0.0, dl * dl / jnp.where(sig_l > 0.0, sig_l, 1.0), 0.0))
+    cross = jnp.sum(k_forward(d, dm) * dp) + jnp.sum((psd_forward(d, dm) - ds) * dl)
+    return jnp.sqrt(jnp.maximum(primal + dual - 2.0 * cross, 0.0))
+
+
+def candidate_stats(d, z):
+    """A candidate's flow objective and its feasibility violations for the stopping test (plan 10.5)."""
+    m = z["m"]
+    r = k_forward(d, m) - d["b"]
+    rows = mv(d["R"], m)
+    y = m[:, :1]
+    box = jnp.maximum(d["open"] * (d["lo"] * y - m), d["open"] * (m - d["hi"] * y))
+    b_m = psd_forward(d, m)
+    norm = jnp.sqrt(jnp.sum(b_m * b_m, axis=(1, 2)))
+    return dict(U=jnp.sum(d["c"] * m), flow=jnp.max(jnp.abs(r) * d["is_flow"]), state=jnp.max(jnp.abs(r) * d["state_mask"]),
+                rows=jnp.maximum(jnp.max(jnp.abs(rows) * d["row_eq"]), jnp.maximum(jnp.max(-rows * d["row_ge"]), jnp.max(box))),
+                psd=jnp.max(-jnp.linalg.eigvalsh(b_m)[:, 0] / (1.0 + norm)))
+
+
+def initial_state(d, theta):
+    """Cold start: zeros (plan 12.1)."""
+    E, r = d["c"].shape[0], d["R"].shape[1]
+    zero = dict(m=jnp.zeros_like(d["c"]), S=jnp.zeros_like(d["sig_l"]), Lam=jnp.zeros_like(d["sig_l"]), p=jnp.zeros_like(d["b"]))
+    return dict(z=zero, avg=zero, count=scalar(0.0), theta=scalar(theta), l0_best=scalar(-np.inf), ld_best=scalar(-np.inf), ipm_res=scalar(0.0),
+                ipm_it=jnp.zeros((), jnp.int64), u=jnp.zeros((E, r)), gamma=jnp.zeros_like(d["sig_l"]))
+
+
+def compile_solver(cfg, d):
+    """Ahead-of-time compiled pieces (plan 7.5): one scan block, the block-end diagnostics and the restart residual. Returns (pieces, seconds)."""
+    sc = cfg["solver"]
+    ipm, rounds = dict(sc["ipm"]), int(sc["rounds_per_scan"])
+    in_round = int(cfg["certificate"]["free_every"]) == 1
+
+    def block_fn(data, state):
+        def one(st, _):
+            z, extra = pdhg_step(data, st["z"], st["theta"], ipm)
+            count = st["count"] + 1.0
+            avg = jax.tree_util.tree_map(lambda a, b: a + (b - a) / count, st["avg"], z)
+            new = dict(st, z=z, avg=avg, count=count, u=extra["u"], gamma=extra["gamma"], ipm_res=jnp.maximum(st["ipm_res"], extra["ipm_res"]),
+                       ipm_it=jnp.maximum(st["ipm_it"], extra["ipm_it"]))
+            if in_round:
+                l0, ld = free_bound(data, z["p"], extra["u"], extra["gamma"])
+                new.update(l0_best=jnp.maximum(st["l0_best"], l0), ld_best=jnp.maximum(st["ld_best"], ld))
+            return new, None
+
+        state, _ = jax.lax.scan(one, state, None, length=rounds)
+        if not in_round:
+            l0, ld = free_bound(data, state["z"]["p"], state["u"], state["gamma"])
+            state = dict(state, l0_best=jnp.maximum(state["l0_best"], l0), ld_best=jnp.maximum(state["ld_best"], ld))
+        return state
+
+    def diag_fn(data, state):
+        return dict(cur=candidate_stats(data, state["z"]), avg=candidate_stats(data, state["avg"]),
+                    e_cur=fixed_point_residual(data, state["z"], state["theta"], ipm), e_avg=fixed_point_residual(data, state["avg"], state["theta"], ipm))
+
+    state = initial_state(d, 1.0)
+    t0 = time.perf_counter()
+    pieces = dict(block=jax.jit(block_fn).lower(d, state).compile(), diag=jax.jit(diag_fn).lower(d, state).compile(),
+                  residual=jax.jit(lambda data, z, th: fixed_point_residual(data, z, th, ipm)).lower(d, state["z"], state["theta"]).compile())
+    return pieces, time.perf_counter() - t0
+
+
+def run_pdhg(cfg, d, pieces, theta, rounds_max, time_budget, stall_rounds, eta, log_path=None, progress=True):
+    """Rounds until the eta stop or a safety stop (plan 10.5, 12.1), with restarts to the better of the current iterate and the average (plan 7.4). Host work happens only between scan blocks. Returns (result dict, final state)."""
+    sc = cfg["solver"]
+    stop = sc["stop"]
+    delta, eps_flow, eps_psd, eps_row = float(sc["delta"]), float(stop["eps_flow"]), float(stop["eps_psd"]), float(stop["eps_row"])
+    beta_s, beta_n = float(sc["restarts"]["beta_sufficient"]), float(sc["restarts"]["beta_necessary"])
+    adapt = sc["primal_weight_update"] == "pdlp"
+    state = initial_state(d, theta)
+    z_restart = state["z"]
+    err_restart = float(pieces["residual"](d, state["z"], state["theta"]))
+    first_err, prev_candidate, restarts = err_restart, np.inf, 0
+    rounds, status, best_u, last_print = 0, None, np.inf, 0.0
+    best_seen, best_round = (-np.inf, np.inf), 0
+    below_l, ipm_worst, ipm_most = 0.0, 0.0, 0
+    log = open(log_path, "w") if log_path else None
+    t0 = time.perf_counter()
+    while status is None:
+        state = dict(state, ipm_res=scalar(0.0), ipm_it=jnp.zeros((), jnp.int64))
+        state = pieces["block"](d, state)
+        jax.block_until_ready(state["z"]["m"])
+        rounds += int(sc["rounds_per_scan"])
+        diag = jax.device_get(pieces["diag"](d, state))
+        now = time.perf_counter() - t0
+        l0, ld = float(state["l0_best"]), float(state["ld_best"])
+        ipm_res, ipm_it = float(state["ipm_res"]), int(state["ipm_it"])
+        ipm_worst, ipm_most = max(ipm_worst, ipm_res), max(ipm_most, ipm_it)
+        passing = [c for c in (diag["cur"], diag["avg"]) if c["flow"] <= eps_flow and c["state"] <= delta + eps_flow and c["rows"] <= eps_row and c["psd"] <= eps_psd]
+        u = min((float(c["U"]) for c in passing), default=np.inf)
+        best_u = min(best_u, u)
+        gap = (u - ld) / max(1.0, abs(ld)) if passing else np.inf
+        if passing:
+            below_l = max(below_l, ld - u)
+            if ld - u > 1e-5 * max(1.0, abs(ld)):
+                raise RuntimeError(f"round {rounds}: a feasible flow costs {u} but the certified bound is {ld}: a bug in the bound or the checks (plan 10.5)")
+        if ld > best_seen[0] + 1e-6 * max(1.0, abs(ld)) or u < best_seen[1] - 1e-6 * max(1.0, abs(u)):
+            best_seen, best_round = (max(best_seen[0], ld), min(best_seen[1], u)), rounds
+        if not math.isfinite(float(diag["cur"]["U"])):
+            status = "diverged"
+        elif gap <= eta:
+            status = "converged_eta"
+        elif rounds >= rounds_max:
+            status = "round_cap"
+        elif now >= time_budget:
+            status = "time_cap"
+        elif rounds - best_round >= stall_rounds:
+            status = "stalled"
+        e_cur, e_avg = float(diag["e_cur"]), float(diag["e_avg"])
+        use_avg = e_avg < e_cur
+        candidate_err = min(e_cur, e_avg)
+        restarted = False
+        if status is None and (candidate_err <= beta_s * err_restart or (candidate_err <= beta_n * err_restart and candidate_err > prev_candidate)):
+            z = state["avg"] if use_avg else state["z"]
+            th = state["theta"]
+            if adapt:
+                dx = math.sqrt(float(jnp.sum((z["m"] - z_restart["m"]) ** 2) + jnp.sum((z["S"] - z_restart["S"]) ** 2)))
+                dy = math.sqrt(float(jnp.sum((z["p"] - z_restart["p"]) ** 2) + jnp.sum((z["Lam"] - z_restart["Lam"]) ** 2)))
+                if dx > 1e-10 and dy > 1e-10:
+                    th = scalar(1.0 / math.exp(0.5 * math.log(dy / dx) + 0.5 * math.log(1.0 / float(th))))
+            state = dict(state, z=z, avg=z, count=scalar(0.0), theta=th)
+            z_restart = z
+            err_restart = float(pieces["residual"](d, z, th)) if adapt else candidate_err
+            prev_candidate, restarted = np.inf, True
+            restarts += 1
+        else:
+            prev_candidate = candidate_err
+        line = dict(round=rounds, seconds=now, L_delta=ld, L_0=l0, U_flow=u, gap=gap, kkt_cur=e_cur, kkt_avg=e_avg, err_restart=err_restart, restarted=restarted, restarts=restarts,
+                    theta=float(state["theta"]), ipm_res=ipm_res, ipm_it=ipm_it, cur={k: float(v) for k, v in diag["cur"].items()}, avg={k: float(v) for k, v in diag["avg"].items()})
+        if log:
+            log.write(json.dumps(line) + "\n")
+        if progress and (now - last_print >= float(sc["log_every_s"]) or status):
+            last_print = now
+            print(f"  round {rounds:7d} {now:8.1f} s  {1e3 * now / rounds:8.3f} ms/round  L_delta {ld:.6f}  U_cur {float(diag['cur']['U']):.6f}  U_ok {u:.6f}  flow {float(diag['cur']['flow']):.1e}  state {float(diag['cur']['state']):.1e}"
+                  f"  psd {float(diag['cur']['psd']):.1e}  kkt {candidate_err:.2e}  restarts {restarts}  ipm its {ipm_it} res {ipm_res:.1e}", flush=True)
+    if log:
+        log.close()
+    seconds = time.perf_counter() - t0
+    current = diag["cur"]
+    score = math.sqrt(max(float(current["U"]) - ld, ld - float(current["U"])) ** 2 + float(current["flow"]) ** 2 + max(float(current["state"]) - delta, 0.0) ** 2 + max(float(current["psd"]), 0.0) ** 2)
+    return dict(status=status, rounds=rounds, seconds=seconds, ms_per_round=1e3 * seconds / rounds, L_delta=ld, L_0=l0, U_flow=None if not math.isfinite(best_u) else best_u,
+                U_current=float(current["U"]), gap=None if not math.isfinite(gap) else gap, restarts=restarts, first_kkt=first_err, last_restart_kkt=err_restart, theta=float(state["theta"]),
+                ipm_res=ipm_worst, ipm_it=ipm_most, largest_bound_excess=below_l, score=score if math.isfinite(score) else float("inf")), state
+
+
+def choose_theta(cfg, d, pieces, label):
+    """The primal/dual balance (plan 7.3): a number from the config, or the grid value with the smallest error after the same short run, stored per configuration and task."""
+    sc = cfg["solver"]
+    if sc["theta_pd"] != "auto":
+        return float(sc["theta_pd"])
+    path = ROOT / cfg["output"]["root"] / "tuned" / f"{label}_{cfg['task']}.yaml"
+    if path.exists():
+        return float(yaml.safe_load(path.read_text())["theta_pd"])
+    t0 = time.perf_counter()
+    scores = {}
+    for theta in sc["tune"]["grid"]:
+        result, _ = run_pdhg(cfg, d, pieces, float(theta), int(sc["tune"]["rounds"]), float(sc["time_budget_s"]), 10 ** 12, -1.0, progress=False)
+        scores[float(theta)] = result["score"]
+        print(f"  tune theta {float(theta):7.4f}: score {result['score']:.3e}  L_delta {result['L_delta']:.6f}  U_cur {result['U_current']:.6f}  {result['ms_per_round']:.3f} ms/round", flush=True)
+    best = min(scores, key=lambda k: scores[k] if math.isfinite(scores[k]) else np.inf)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(dict(theta_pd=best, scores=scores, seconds=time.perf_counter() - t0)))
+    print(f"  chose theta {best} in {time.perf_counter() - t0:.1f} s; saved {path}", flush=True)
+    return best
+
+
+def component_times(cfg, d, state):
+    """One-off timings of a round's pieces at a real state, for finding the hot spot: each compiled and run alone, so launch overhead is not shared as it is in the scan."""
+    ipm = dict(cfg["solver"]["ipm"])
+    z, theta = state["z"], state["theta"]
+    t = d["T"] * theta
+    g = d["c"] + k_adjoint(d, z["p"]) + psd_adjoint(d, z["Lam"])
+    h, f = 1.0 / t, g - z["m"] / t
+    pieces = dict(edge_qp=(lambda a, b: edge_qp(d, a, b, ipm), (h, f)), eigh=(jnp.linalg.eigh, (z["S"] + d["t_s"] * theta * z["Lam"],)), k_forward=(lambda m: k_forward(d, m), (z["m"],)),
+                  k_adjoint=(lambda p: k_adjoint(d, p), (z["p"],)), psd_adjoint=(lambda lam: psd_adjoint(d, lam), (z["Lam"],)),
+                  free_bound=(lambda p, u, gamma: free_bound(d, p, u, gamma), (z["p"], state["u"], state["gamma"])), round=(lambda st: pdhg_step(d, st, theta, ipm), (z,)))
+    return {name: timed(fn, *args)[0] * 1e3 for name, (fn, args) in pieces.items()}
+
 
 # ===== SKIPPING =====
 # Milestone M5 (plan section 9).
 
-# ===== CERTIFICATE =====
-# Milestones M3 and M9 (plan section 10).
-
 # ===== TREES =====
 # Milestones M6-M8 (plan section 11).
 
+# ===== SELFTEST =====
+# Milestone M3 (plan 17) on the tiny instance, against the J_rel that Clarabel saved in reference.json.
+
+def run_checks(checks):
+    ok_all, results = True, []
+    for name, fn in checks:
+        t0 = time.perf_counter()
+        try:
+            ok, msg = fn()
+        except Exception as exc:
+            ok, msg = False, f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+        results.append(dict(name=name, ok=bool(ok), msg=msg, seconds=round(time.perf_counter() - t0, 3)))
+        print(f"[{'PASS' if ok else 'FAIL'}] {name} ({results[-1]['seconds']:.1f}s): {msg}", flush=True)
+        ok_all &= bool(ok)
+    return ok_all, results
+
+
+def random_primal(d, key):
+    """A random m and S on the active entries only, so that padding stays zero."""
+    k1, k2 = jax.random.split(key)
+    keep = jnp.maximum(d["open"], d["e0"])
+    m = jax.random.normal(k1, d["c"].shape) * keep
+    g = jax.random.normal(k2, d["sig_l"].shape) * d["psd_mask"]
+    return m, 0.5 * (g + swap(g))
+
+
+def check_operators(d):
+    """The adjoints are true adjoints, and the step sizes give ||Sigma^(1/2) A T^(1/2)|| < 1 (plan 7.3), by power iteration on the whole operator (K m, B(m) - S)."""
+    key = jax.random.PRNGKey(5)
+    k1, k2, k3 = jax.random.split(key, 3)
+    m, lam = random_primal(d, k1)
+    p = jax.random.normal(k2, d["b"].shape)
+    err_k = abs(float(jnp.sum(k_forward(d, m) * p) - jnp.sum(m * k_adjoint(d, p))))
+    err_b = abs(float(jnp.sum(psd_forward(d, m) * lam) - jnp.sum(m * psd_adjoint(d, lam))))
+    keep = jnp.maximum(d["open"], d["e0"])
+    rt, rs, rp, rl = jnp.sqrt(d["T"]) * keep, jnp.sqrt(d["t_s"]), jnp.sqrt(d["sig_p"]), jnp.sqrt(d["sig_l"])
+
+    def forward(x, s):
+        return rp * k_forward(d, rt * x), rl * (psd_forward(d, rt * x) - rs * s)
+
+    def adjoint(a, b):
+        return rt * (k_adjoint(d, rp * a) + psd_adjoint(d, rl * b)), -rs * rl * b
+
+    x, s = random_primal(d, k3)
+    norm = 0.0
+    for _ in range(300):
+        a, b = forward(x, s)
+        x, s = adjoint(a, b)
+        size = jnp.sqrt(jnp.sum(x * x) + jnp.sum(s * s))
+        x, s = x / size, s / size
+        norm = math.sqrt(float(size))
+    ok = err_k <= 1e-9 and err_b <= 1e-9 and norm < 1.0
+    return ok, f"K adjoint error {err_k:.1e}, B adjoint error {err_b:.1e}; step-scaled operator norm {norm:.4f} (must be below 1)"
+
+
+def clarabel_edge_qp(d, e, h, f):
+    """One edge's QP through Clarabel, an independent solver: the same rows on the entries in use."""
+    import clarabel
+    import scipy.sparse as sp
+    keep = np.flatnonzero(np.maximum(np.asarray(d["open"][e]), np.asarray(d["e0"])))
+    lo, hi, R = np.asarray(d["lo"][e])[keep], np.asarray(d["hi"][e])[keep], np.asarray(d["R"][e])[:, keep]
+    eq, ge = np.asarray(d["row_eq"][e]) > 0.0, np.asarray(d["row_ge"][e]) > 0.0
+    n = keep.size
+    bounds = np.zeros((2 * (n - 1), n))
+    for i in range(1, n):
+        bounds[2 * (i - 1), i], bounds[2 * (i - 1), 0] = 1.0, -lo[i]
+        bounds[2 * (i - 1) + 1, i], bounds[2 * (i - 1) + 1, 0] = -1.0, hi[i]
+    rows = np.vstack([R[eq], -R[ge], -bounds])
+    settings = clarabel.DefaultSettings()
+    settings.verbose = False
+    settings.max_threads = 1
+    settings.tol_gap_abs = settings.tol_gap_rel = settings.tol_feas = 1e-10
+    cones = ([clarabel.ZeroConeT(int(eq.sum()))] if eq.any() else []) + [clarabel.NonnegativeConeT(int(ge.sum()) + bounds.shape[0])]
+    sol = clarabel.DefaultSolver(sp.diags(np.asarray(h[e])[keep], format="csc"), np.asarray(f[e])[keep], sp.csc_matrix(rows), np.zeros(rows.shape[0]), cones, settings).solve()
+    out = np.zeros(h.shape[1])
+    out[keep] = np.asarray(sol.x)
+    return out
+
+
+def check_edge_qp(d, cfg, draws=3):
+    """The batched IPM against Clarabel on sampled edges, with random data that puts solutions on the boundary, and at the cone's apex, where a large positive flow price makes the exact step zero."""
+    st = cfg["selftest"]["m3"]
+    ipm = dict(cfg["solver"]["ipm"])
+    solve = jax.jit(lambda a, b: edge_qp(d, a, b, ipm))
+    E = d["c"].shape[0]
+    picks = np.linspace(0, E - 1, min(int(st["qp_edges"]), E)).astype(int)
+    worst, res, its = 0.0, 0.0, 0
+    for i in range(draws):
+        k1, k2, k3 = jax.random.split(jax.random.PRNGKey(100 + i), 3)
+        keep = jnp.maximum(d["open"], d["e0"])
+        h = jnp.exp(jax.random.normal(k1, d["c"].shape)) * keep + (1.0 - keep)
+        center = (0.5 * (d["lo"] + d["hi"]) * d["open"] + d["e0"]) * jax.random.uniform(k2, (E, 1), minval=0.0, maxval=2.0)
+        f = (jax.random.normal(k3, d["c"].shape) - h * center) * keep
+        x, _, stats = solve(h, f)
+        res, its = max(res, float(stats["ipm_res"])), max(its, int(stats["ipm_it"]))
+        for e in picks:
+            worst = max(worst, float(np.max(np.abs(np.asarray(x[e]) - clarabel_edge_qp(d, int(e), h, f)))))
+    x, _, stats = solve(jnp.ones_like(d["c"]), 10.0 * d["e0"] * jnp.ones_like(d["c"]))
+    apex = float(jnp.max(jnp.abs(x)))
+    ok = worst <= 1e-6 and res <= 1e-8 and apex <= 1e-8
+    return ok, f"{picks.size} edges x {draws} draws: largest difference from Clarabel {worst:.1e}; worst IPM residual {res:.1e}, most iterations {its}; apex step size {apex:.1e} in {int(stats['ipm_it'])} iterations"
+
+
+def check_hand_push(cfg, d, info, ref):
+    """The GPU arrays hold the hand push: a true trajectory from push_model.py is flow-conserving, satisfies every row, box and PSD block, and costs J_hand. The free bound stays below J_hand and J_rel for random prices and multipliers in their cones (tex Thm 5.5), which it must for any of them."""
+    import push_model as pm
+    plain = deep_merge(cfg, {"build": {"workers": 1}})
+    md, modes, task, tr = pm.build_instance(plain)
+    if not np.array_equal(np.flatnonzero(tr["edge_alive"]), info["alive"]):
+        return False, "push_model.py and problem.npz disagree on the alive edges"
+    place = {int(e): i for i, e in enumerate(info["alive"])}
+    m = np.zeros(d["c"].shape)
+    J_hand = 0.0
+    steps = pm.hand_push(plain, md, task, modes)
+    for (kind, tail, head, v), e in zip(steps, pm.path_edge_ids(tr, modes, steps)):
+        rel = pm.relax_edge_type(plain, md, task, modes, tr, int(tr["edge_type"][e]))
+        m[place[int(e)], :rel["n"]] = pm.lift_points(rel, md, task, kind, tail, head, v[None])[0]
+        J_hand += pm.poly_eval(pm.edge_cost(plain, tail, head), v)
+    z = dict(m=jnp.asarray(m))
+    stats = {k: float(v) for k, v in candidate_stats(d, z).items()}
+    ok = stats["flow"] <= 1e-12 and stats["state"] <= 1e-12 and stats["rows"] <= 1e-9 and stats["psd"] <= 1e-10 and abs(stats["U"] - J_hand) <= 1e-12
+    worst_l0, worst_ld = -np.inf, -np.inf
+    bound = jax.jit(lambda p, u, gamma: free_bound(d, p, u, gamma))
+    for i in range(int(cfg["selftest"]["m3"]["bound_draws"])):
+        k1, k2, k3 = jax.random.split(jax.random.PRNGKey(200 + i), 3)
+        scale = 10.0 ** (i % 4 - 2)
+        p = scale * jax.random.normal(k1, d["b"].shape)
+        raw = scale * jax.random.normal(k2, d["R"].shape[:2])
+        u = d["row_eq"] * raw + d["row_ge"] * jnp.abs(raw)
+        g = scale * jax.random.normal(k3, d["sig_l"].shape) * d["psd_mask"]
+        l0, ld = bound(p, u, g @ swap(g))
+        worst_l0, worst_ld = max(worst_l0, float(l0)), max(worst_ld, float(ld))
+    J_rel = float(ref["J"])
+    tol = float(cfg["selftest"]["m3"]["tol_j_rel"])
+    ok = ok and worst_l0 <= J_hand + 1e-9 and worst_ld <= J_rel + tol
+    return ok, (f"hand push: flow {stats['flow']:.1e}, state {stats['state']:.1e}, rows {stats['rows']:.1e}, psd {stats['psd']:.1e}, cost {stats['U']:.6f} vs J_hand {J_hand:.6f}; "
+                f"best random bound L_0 {worst_l0:.3e}, L_delta {worst_ld:.3e}")
+
+
+def selftest(sets):
+    """Milestone M3 (plan 17) on the tiny instance: run D's solver reaches J_rel from below, restarts work, and the stopping test brackets J_rel."""
+    t0 = time.perf_counter()
+    enable_compile_cache(load_config("ref_tiny", sets))
+    base = load_config("ref_tiny", sets)
+    st = base["selftest"]["m3"]
+    cfg = deep_merge(base, {"tree": {"type": "none"}, "solver": {"tune": {"rounds": int(st["tune_rounds"])}, "stop": {"eta_rel": float(st["eta_rel"])}}})
+    ref_path = run_dir(cfg) / "reference.json"
+    if not ref_path.exists():
+        print(f"no reference value at {ref_path}; run: python push_model.py --run ref_tiny --reference", flush=True)
+        return False
+    ref = json.loads(ref_path.read_text())
+    if ref.get("fingerprint") != reference_fingerprint(cfg):
+        print(f"{ref_path} came from another config; rerun: python push_model.py --run ref_tiny --reference", flush=True)
+        return False
+    prob = ensure_problem(cfg, "ref_tiny", None, sets)
+    d, info = build_data(prob, cfg)
+    print(f"tiny instance: {info['E']} edges, {info['V']} vertices, {info['types']} edge types; m {info['n']}, rows {info['r']}, moment matrix {info['s']}, q {info['q']}; J_rel {ref['J']:.6f} ({ref['status']}), J_hand {ref['J_hand']:.6f}", flush=True)
+    J_rel = float(ref["J"])
+    tol = float(st["tol_j_rel"])
+    solved = {}
+
+    def solve_tiny():
+        pieces, compile_s = compile_solver(cfg, d)
+        print(f"  compiled in {compile_s:.1f} s", flush=True)
+        theta = choose_theta(cfg, d, pieces, "selftest_m3")
+        out = run_dir(cfg) / "selftest_m3"
+        out.mkdir(parents=True, exist_ok=True)
+        result, state = run_pdhg(cfg, d, pieces, theta, int(st["rounds_max"]), float(st["time_budget_s"]), int(st["stall_rounds"]), float(st["eta_rel"]), log_path=out / "log.jsonl")
+        solved.update(result)
+        times = component_times(cfg, d, state)
+        print("  one-off piece times, ms: " + ", ".join(f"{k} {v:.3f}" for k, v in times.items()), flush=True)
+        solved["component_ms"] = times
+        return result["status"] == "converged_eta", f"{result['status']} at theta {theta}: {result['rounds']} rounds in {result['seconds']:.1f} s ({result['ms_per_round']:.3f} ms/round); L_delta {result['L_delta']:.6f}, U_flow {result['U_flow']}, gap {result['gap']}"
+
+    def check_bracket():
+        if solved.get("status") != "converged_eta":
+            return False, "the solve did not reach the stop"
+        L, U = solved["L_delta"], solved["U_flow"]
+        near = abs(U - J_rel) <= 1e-4 * abs(J_rel) + tol
+        return L <= J_rel + tol and U >= J_rel - tol and near, f"L_delta {L:.7f} <= J_rel {J_rel:.7f} <= U_flow {U:.7f} (slack {tol:.0e}); |U - J_rel| / J_rel = {abs(U - J_rel) / abs(J_rel):.1e}"
+
+    def check_bound_below():
+        L = solved.get("L_delta", np.inf)
+        return L <= J_rel + tol, f"best L_delta over all rounds {L:.7f}, J_rel {J_rel:.7f}: the best is a running maximum, so this covers every round"
+
+    def check_restarts():
+        fired, first, last = solved.get("restarts", 0), solved.get("first_kkt", np.inf), solved.get("last_restart_kkt", np.inf)
+        return fired >= 1 and last < first, f"{fired} restarts; KKT error at the start {first:.2e}, at the last restart {last:.2e}"
+
+    ok, checked = run_checks([
+        ("M3 operators: adjoints and step sizes", lambda: check_operators(d)),
+        ("M3 edge QP against Clarabel", lambda: check_edge_qp(d, cfg)),
+        ("M3 arrays hold the hand push, and the free bound stays valid", lambda: check_hand_push(cfg, d, info, ref)),
+        ("M3 run D reaches the stop on the tiny instance", solve_tiny),
+        ("M3 the stop brackets J_rel", check_bracket),
+        ("M3 every logged bound stays below J_rel", check_bound_below),
+        ("M3 restarts fire and reduce the KKT error", check_restarts),
+    ])
+    out = ROOT / cfg["output"]["root"] / "selftest" / "m3.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(dict(ok=ok, results=checked, solve=solved, J_rel=J_rel, env=environment_info()), indent=2))
+    print(f"\n{'ALL M3 CHECKS PASSED' if ok else 'SOME M3 CHECKS FAILED'} in {time.perf_counter() - t0:.0f}s; details in {out}", flush=True)
+    return ok
+
+
 # ===== MAIN =====
+
+def enable_compile_cache(cfg):
+    """A persistent compilation cache, so that jobs with the same shapes reuse compiled code (plan 3)."""
+    jax.config.update("jax_compilation_cache_dir", os.path.expanduser(str(cfg["solver"]["compile"]["cache_dir"])))
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+
+
+def solve_run(cfg, run, task, sets):
+    """One run from config to outputs (plan 12.1, 12.4). So far: plain PDHG at order 1, so tree.type must be none."""
+    if cfg["tree"]["type"] != "none":
+        raise NotImplementedError("trees come at M6: use a run with tree.type none, such as D")
+    enable_compile_cache(cfg)
+    prob = ensure_problem(cfg, run, task, sets)
+    d, info = build_data(prob, cfg)
+    print(f"{cfg['run_name']} on {cfg['task']}: {info['E']} edges, {info['V']} vertices, {info['types']} edge types; m {info['n']}, rows {info['r']}, moment matrix {info['s']}, q {info['q']}", flush=True)
+    pieces, compile_s = compile_solver(cfg, d)
+    print(f"compiled in {compile_s:.1f} s", flush=True)
+    theta = choose_theta(cfg, d, pieces, cfg["run_name"])
+    out = run_dir(cfg)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "config.resolved.yaml").write_text(yaml.safe_dump(cfg))
+    result, state = run_pdhg(cfg, d, pieces, theta, int(cfg["solver"]["rounds_max"]), float(cfg["solver"]["time_budget_s"]), int(cfg["solver"]["stall_rounds"]),
+                             float(cfg["solver"]["stop"]["eta_rel"]), log_path=out / "log.jsonl")
+    times = component_times(cfg, d, state)
+    print("one-off piece times, ms: " + ", ".join(f"{k} {v:.3f}" for k, v in times.items()), flush=True)
+    (out / "cert.json").write_text(json.dumps(result, indent=2))
+    (out / "timing.json").write_text(json.dumps(dict(env=environment_info(), compile_s=compile_s, seconds=result["seconds"], rounds=result["rounds"], ms_per_round=result["ms_per_round"], component_ms=times), indent=2))
+    z = jax.device_get(state["z"])
+    np.savez(out / "final_state.npz", m=z["m"], S=z["S"], Lam=z["Lam"], p=z["p"], alive=info["alive"])
+    print(json.dumps(result, indent=2))
+    print(f"saved {out}", flush=True)
+    return result
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--run", default=None, help="run config: a name in configs/runs/ or a path")
+    ap.add_argument("--task", default=None, help="task name, overriding the config")
     ap.add_argument("--set", action="append", default=[], help="override one key, e.g. --set trellis.N=16")
+    ap.add_argument("--selftest", action="store_true", help="milestone M3 on the tiny instance")
+    ap.add_argument("--bench_chol", action="store_true", help="Cholesky at the edge QP's real sizes: library vs hand-written")
     ap.add_argument("--bench_psd", action="store_true", help="PSD projection per round, orders 1-3 (M0)")
     ap.add_argument("--bench_linalg", action="store_true", help="Cholesky, tree-merge pieces and coupling (M0, before M3)")
     ap.add_argument("--bench_eigh", action="store_true", help="the original batched-eigh scaling test (M0)")
     args = ap.parse_args()
+    if args.selftest:
+        sys.exit(0 if selftest(args.set) else 1)
     cfg = load_config(args.run, args.set)
+    if args.task:
+        cfg["task"] = args.task
+    if args.bench_chol:
+        bench_chol(cfg)
     if args.bench_psd:
         bench_psd(cfg)
     if args.bench_linalg:
         bench_linalg(cfg)
     if args.bench_eigh:
         bench_eigh(cfg)
-    if not (args.bench_psd or args.bench_linalg or args.bench_eigh):
+    if args.bench_chol or args.bench_psd or args.bench_linalg or args.bench_eigh:
+        return
+    if not args.run:
         ap.print_help()
         sys.exit(1)
+    result = solve_run(cfg, args.run, args.task, args.set)
+    sys.exit(0 if result["status"] == "converged_eta" else 1)
 
 
 if __name__ == "__main__":

@@ -68,7 +68,10 @@ solver:
   qp_block: auto                 # exact_ipm for kappa=1, split_rows for kappa>=2
   psd_proj: auto                 # auto | eigh | lowrank | polar_ns: eigh at kappa 1, lowrank (polar_ns fallback) above (8.2)
   psd_lowrank: {p: 8, tol: 1.0e-6, exact_check_every: 50}   # basis size, residual that sends a matrix to the fallback, rounds between exact-error logs (kappa 1)
-  ipm: {iters: 40, tol: 1.0e-11}
+  # Edge QP (8.1). iters caps the iterations. adaptive stops once every edge has converged, at the
+  # cost of reading one flag per iteration. cholesky: library | small (hand-written, for small sizes).
+  ipm: {iters: 40, tol: 1.0e-11, adaptive: true, cholesky: library}
+  log_every_s: 10                # progress line at most this often; every scan block goes to log.jsonl
   restarts: {scheme: pdlp_kkt, beta_sufficient: 0.2, beta_necessary: 0.8}
   checkpoint_every: 2000
 
@@ -151,6 +154,15 @@ selftest:
     order2: {task: T1_push_straight, N: 4, time_limit_s: 300}   # --survey: the two forms, and SDP order 2 through SCS, on a shorter horizon
     tol_hand: 1.0e-6             # J_rel may exceed J_hand by this much
     tol_forms: 1.0e-5            # the reduced and full forms may differ by this much, relative to max(1, |J_rel|)
+  m3:                            # run_trajopt.py --selftest, against the saved ref_tiny value
+    eta_rel: 5.0e-6              # gap small enough to put the objective within 1e-4 of J_rel on this instance
+    rounds_max: 400000
+    time_budget_s: 1200
+    stall_rounds: 50000
+    tune_rounds: 500             # per step-size candidate
+    qp_edges: 16                 # edge QPs compared against Clarabel, per draw
+    bound_draws: 20              # random multiplier draws for the free bound
+    tol_j_rel: 1.0e-5            # slack on J_rel, which comes from a solver stopped at reduced accuracy
 
 # M0 benchmarks (plan 8.2 and section 0: every round primitive must truly batch).
 bench:
@@ -174,3 +186,7 @@ bench:
     merge_eigh: [[32, [16, 64]], [128, [16, 64]]]                  # low-rank tree merge, k = 2r for r = 16, 64
     merge_orth: [[1120, 32, [16, 64]], [1120, 128, [16, 64]]]      # [rows, cols, [batches]]: QR vs Gram-matrix orthonormalization
     coupling: {q: 28, edges: [2600, 26000]}
+  small_cholesky:                # --bench_chol: the edge QP's real system sizes (8.1), library vs hand-written
+    repeats: 5
+    sizes: [3, 5, 7, 10, 14]
+    batches: [650, 2600]

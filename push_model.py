@@ -1887,7 +1887,7 @@ def save_problem(path, cfg, md, modes, task, tr, rels):
                 edge_kinds=list(EDGE_KINDS), task=dict(name=task["name"], start=task["start"].tolist(),
                 goal=task["goal"].tolist(), pusher_start=task["pusher_start"].tolist(), start_region=task["start_region"]),
                 model={k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in md.items()},
-                relaxation=cfg["relaxation"])
+                relaxation=cfg["relaxation"], fingerprint=reference_fingerprint(cfg))
     arrays = pack_relaxations(rels)
     # compressing a kappa = 3 model takes minutes and saves little that matters
     writer = np.savez_compressed if sum(np.size(a) for a in arrays.values()) < 5e7 else np.savez

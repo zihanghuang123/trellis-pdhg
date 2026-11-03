@@ -1,0 +1,17 @@
+tiny: {"task": "T1_push_straight", "N": 8, "modes": 10, "transitions_per_layer": 38, "vertices": 72, "edges": 244, "edges_by_kind": {"start": 6, "mid": 228, "goal": 10}, "edges_after_lp": 242, "edges_alive": 138, "types": 54, "types_lp_infeasible": 2, "types_used": 32, "types_lp_trouble": [], "lp_seconds": 2.48}
+full: {"task": "T1_push_straight", "N": 32, "modes": 20, "transitions_per_layer": 84, "vertices": 622, "edges": 2546, "edges_by_kind": {"start": 6, "mid": 2520, "goal": 20}, "edges_after_lp": 2544, "edges_alive": 2340, "types": 110, "types_lp_infeasible": 2, "types_used": 108, "types_lp_trouble": [], "lp_seconds": 4.41}
+built both instances in 6.9s
+[PASS] M0 geometry and limit surface (0.1s): tangents counter-clockwise; rbar 0.06737 m (changes 2.9e-07 at 2x grid), f_max 0.4905 N, tau_max 0.03304 N m
+[PASS] M0 friction sign (force on the slider along the pusher's slide) (0.0s): slide_pos drags the slider toward +t_j and slide_neg toward -t_j on every face; each fails the opposite type
+[PASS] M0 torque sign (0.0s): a +x push on face 2 above its center turns the slider clockwise, below it counter-clockwise
+[PASS] M0 true steps satisfy the constraint table (0.2s): worst violation over 700 random true steps 2.6e-16 (c0_slide_pos rot_rel)
+[PASS] M0 constraint table degrees and rows (0.0s): 110 edge types: every row and cost has degree <= 2 and carries the rows of its mode
+[PASS] M0 mode graph (plan 4.4) (0.0s): 20 modes, 84 transitions per layer, symmetric, matching plan 4.4 entry by entry
+[PASS] M0 trellis counts (0.0s): 2546 edges (6 start, 20 goal), 622 vertices; adjacent layers only, in order
+[PASS] M0 flow and coupling signs (0.0s): unit flow on a path conserves flow with beta_s = -1, beta_t = +1 (head +, tail -); breaking the path breaks it at both ends
+[PASS] M0 pruning soundness, tiny (0.0s): 2 edge types LP-infeasible (each misses feasibility by > 1e-07); 104 edges off every start->goal path; 138 of 244 edges kept
+[PASS] M0 pruning soundness, full (0.0s): 2 edge types LP-infeasible (each misses feasibility by > 1e-07); 204 edges off every start->goal path; 2340 of 2546 edges kept
+[PASS] M0 hand-scripted push, tiny (0.0s): N=8, 10 modes: valid start->goal path, worst residual 5.6e-17, J_hand = 0.066059 (strip_2 -> c2_stick x7 -> goal)
+[PASS] M0 hand-scripted push, full (0.0s): N=32, 20 modes: valid start->goal path, worst residual 1.1e-16, J_hand = 0.053800 (strip_2 -> c2_stick x31 -> goal)
+
+ALL M0 CHECKS PASSED; details in /scratch/residual-controller/trellis-pdhg/runs/selftest/m0.json

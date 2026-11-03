@@ -1,0 +1,996 @@
+{
+  "env": {
+    "python": "3.11.18",
+    "jax": "0.10.2",
+    "jaxlib": "0.10.2",
+    "backend": "gpu",
+    "devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2",
+      "cuda:3",
+      "cuda:4",
+      "cuda:5",
+      "cuda:6",
+      "cuda:7"
+    ],
+    "device_kind": "NVIDIA A100-SXM4-80GB",
+    "xla_flags": "",
+    "x64": true,
+    "platform_version": "PJRT C API\ncuda 12090",
+    "nvidia_smi": [
+      "0, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "1, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "2, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "3, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "4, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "5, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "6, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "7, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB"
+    ]
+  },
+  "rows": [
+    {
+      "group": "chol",
+      "name": "cholesky",
+      "n": 30,
+      "batch": 2600,
+      "seconds": 0.0002806521952152252,
+      "compile_s": 0.082,
+      "per_item_us": 0.10794315200585586,
+      "gflops": 83.3772206273146,
+      "roofline": 0.004275754903964851
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_vec",
+      "n": 30,
+      "batch": 2600,
+      "seconds": 0.0004593580961227417,
+      "compile_s": 0.077,
+      "per_item_us": 0.17667619081643912,
+      "gflops": 61.12878000194634,
+      "roofline": 0.003134809230869043,
+      "residual": 5.86774617745909e-16
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_mat",
+      "n": 30,
+      "batch": 2600,
+      "seconds": 0.0007587224245071411,
+      "compile_s": 0.072,
+      "per_item_us": 0.2918163171181312,
+      "gflops": 215.88922998605574,
+      "roofline": 0.011071242563387472
+    },
+    {
+      "group": "chol",
+      "name": "matmul",
+      "n": 30,
+      "batch": 2600,
+      "seconds": 0.0001196637749671936,
+      "compile_s": 0.122,
+      "per_item_us": 0.046024528833536,
+      "gflops": 1173.2874049685574,
+      "roofline": 0.06016858487018243
+    },
+    {
+      "group": "chol",
+      "name": "cholesky",
+      "n": 30,
+      "batch": 10400,
+      "seconds": 0.0008160397410392761,
+      "compile_s": 0.118,
+      "per_item_us": 0.07846535971531501,
+      "gflops": 114.70029618998056,
+      "roofline": 0.005882066471281054
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_vec",
+      "n": 30,
+      "batch": 10400,
+      "seconds": 0.001312602311372757,
+      "compile_s": 0.108,
+      "per_item_us": 0.12621176070891893,
+      "gflops": 85.57047250856395,
+      "roofline": 0.004388229359413536,
+      "residual": 7.300374855138072e-16
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_mat",
+      "n": 30,
+      "batch": 10400,
+      "seconds": 0.002446576952934265,
+      "compile_s": 0.107,
+      "per_item_us": 0.23524778393598703,
+      "gflops": 267.80273525187744,
+      "roofline": 0.013733473602660381
+    },
+    {
+      "group": "chol",
+      "name": "matmul",
+      "n": 30,
+      "batch": 10400,
+      "seconds": 0.00018410012125968933,
+      "compile_s": 0.122,
+      "per_item_us": 0.01770193473650859,
+      "gflops": 3050.514014642142,
+      "roofline": 0.15643661613549445
+    },
+    {
+      "group": "chol",
+      "name": "cholesky",
+      "n": 136,
+      "batch": 2600,
+      "seconds": 0.0034577473998069763,
+      "compile_s": 0.093,
+      "per_item_us": 1.3299028460796063,
+      "gflops": 630.4861560414638,
+      "roofline": 0.032332623386741734
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_vec",
+      "n": 136,
+      "batch": 2600,
+      "seconds": 0.004538547247648239,
+      "compile_s": 0.092,
+      "per_item_us": 1.7455950952493229,
+      "gflops": 501.5351702785859,
+      "roofline": 0.02571975232197876,
+      "residual": 5.37285253818666e-16
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_mat",
+      "n": 136,
+      "batch": 2600,
+      "seconds": 0.01445043832063675,
+      "compile_s": 0.091,
+      "per_item_us": 5.557860892552595,
+      "gflops": 1056.0532994264374,
+      "roofline": 0.05415657945776602
+    },
+    {
+      "group": "chol",
+      "name": "matmul",
+      "n": 136,
+      "batch": 2600,
+      "seconds": 0.0022171884775161743,
+      "compile_s": 0.251,
+      "per_item_us": 0.8527647990446825,
+      "gflops": 5899.530568846094,
+      "roofline": 0.30254002917159456
+    },
+    {
+      "group": "chol",
+      "name": "cholesky",
+      "n": 136,
+      "batch": 10400,
+      "seconds": 0.013229411095380783,
+      "compile_s": 0.126,
+      "per_item_us": 1.2720587591712291,
+      "gflops": 659.1561335418364,
+      "roofline": 0.0338028786431711
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_vec",
+      "n": 136,
+      "batch": 10400,
+      "seconds": 0.016450051218271255,
+      "compile_s": 0.092,
+      "per_item_us": 1.5817356940645437,
+      "gflops": 553.4915451541989,
+      "roofline": 0.028384181802779428,
+      "residual": 5.747900722462774e-16
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_mat",
+      "n": 136,
+      "batch": 10400,
+      "seconds": 0.04974161833524704,
+      "compile_s": 0.091,
+      "per_item_us": 4.782847916850677,
+      "gflops": 1227.1762421411274,
+      "roofline": 0.06293211498159627
+    },
+    {
+      "group": "chol",
+      "name": "matmul",
+      "n": 136,
+      "batch": 10400,
+      "seconds": 0.007831968367099762,
+      "compile_s": 0.248,
+      "per_item_us": 0.7530738814519001,
+      "gflops": 6680.502569416665,
+      "roofline": 0.34258987535470076
+    },
+    {
+      "group": "chol",
+      "name": "cholesky",
+      "n": 560,
+      "batch": 16,
+      "seconds": 0.001232679933309555,
+      "compile_s": 0.091,
+      "per_item_us": 77.04249583184719,
+      "gflops": 759.8230825028443,
+      "roofline": 0.03896528628219714
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_vec",
+      "n": 560,
+      "batch": 16,
+      "seconds": 0.0024412572383880615,
+      "compile_s": 0.083,
+      "per_item_us": 152.57857739925385,
+      "gflops": 387.77309157790063,
+      "roofline": 0.019885799568097468,
+      "residual": 4.480982326872643e-16
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_mat",
+      "n": 560,
+      "batch": 16,
+      "seconds": 0.003607776015996933,
+      "compile_s": 0.084,
+      "per_item_us": 225.4860009998083,
+      "gflops": 1817.277635195699,
+      "roofline": 0.09319372488183071
+    },
+    {
+      "group": "chol",
+      "name": "matmul",
+      "n": 560,
+      "batch": 16,
+      "seconds": 0.0005515813827514648,
+      "compile_s": 0.235,
+      "per_item_us": 34.47383642196655,
+      "gflops": 10188.364175685327,
+      "roofline": 0.5224802141377091
+    },
+    {
+      "group": "chol",
+      "name": "cholesky",
+      "n": 560,
+      "batch": 64,
+      "seconds": 0.002438824623823166,
+      "compile_s": 0.087,
+      "per_item_us": 38.10663474723697,
+      "gflops": 1536.1804330126838,
+      "roofline": 0.0787784837442402
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_vec",
+      "n": 560,
+      "batch": 64,
+      "seconds": 0.004089944064617157,
+      "compile_s": 0.084,
+      "per_item_us": 63.90537600964308,
+      "gflops": 925.8355143351125,
+      "roofline": 0.047478744324877566,
+      "residual": 4.775408997913051e-16
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_mat",
+      "n": 560,
+      "batch": 64,
+      "seconds": 0.009144570678472519,
+      "compile_s": 0.084,
+      "per_item_us": 142.8839168511331,
+      "gflops": 2867.8571787305896,
+      "roofline": 0.147069598909261
+    },
+    {
+      "group": "chol",
+      "name": "matmul",
+      "n": 560,
+      "batch": 64,
+      "seconds": 0.0018692351877689362,
+      "compile_s": 0.016,
+      "per_item_us": 29.206799808889627,
+      "gflops": 12025.69272560618,
+      "roofline": 0.6167021910567273
+    },
+    {
+      "group": "chol",
+      "name": "cholesky",
+      "n": 960,
+      "batch": 16,
+      "seconds": 0.003552313894033432,
+      "compile_s": 0.075,
+      "per_item_us": 222.0196183770895,
+      "gflops": 1328.3150478130556,
+      "roofline": 0.06811872040066952
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_vec",
+      "n": 960,
+      "batch": 16,
+      "seconds": 0.006170753389596939,
+      "compile_s": 0.075,
+      "per_item_us": 385.6720868498087,
+      "gflops": 769.4495145446309,
+      "roofline": 0.03945894946382723,
+      "residual": 4.906254128519768e-16
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_mat",
+      "n": 960,
+      "batch": 16,
+      "seconds": 0.009730909019708633,
+      "compile_s": 0.073,
+      "per_item_us": 608.1818137317896,
+      "gflops": 3394.3533880649725,
+      "roofline": 0.17406940451615244
+    },
+    {
+      "group": "chol",
+      "name": "matmul",
+      "n": 960,
+      "batch": 16,
+      "seconds": 0.002067413181066513,
+      "compile_s": 0.214,
+      "per_item_us": 129.21332381665707,
+      "gflops": 13694.191494607268,
+      "roofline": 0.7022662304926804
+    },
+    {
+      "group": "chol",
+      "name": "cholesky",
+      "n": 960,
+      "batch": 64,
+      "seconds": 0.007481172680854797,
+      "compile_s": 0.077,
+      "per_item_us": 116.89332313835621,
+      "gflops": 2522.915698537708,
+      "roofline": 0.12938029223270298
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_vec",
+      "n": 960,
+      "batch": 64,
+      "seconds": 0.01041184738278389,
+      "compile_s": 0.075,
+      "per_item_us": 162.68511535599828,
+      "gflops": 1824.1078745933255,
+      "roofline": 0.09354399356888848,
+      "residual": 4.874237004528377e-16
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_mat",
+      "n": 960,
+      "batch": 64,
+      "seconds": 0.02471858263015747,
+      "compile_s": 0.073,
+      "per_item_us": 386.2278535962105,
+      "gflops": 5344.989960662575,
+      "roofline": 0.27410204926474746
+    },
+    {
+      "group": "chol",
+      "name": "matmul",
+      "n": 960,
+      "batch": 64,
+      "seconds": 0.0064581818878650665,
+      "compile_s": 0.213,
+      "per_item_us": 100.90909199789166,
+      "gflops": 17535.307918903585,
+      "roofline": 0.8992465599437736
+    },
+    {
+      "group": "merge",
+      "name": "eigh",
+      "n": 32,
+      "batch": 16,
+      "seconds": 0.00039055943489074707,
+      "compile_s": 0.063,
+      "per_item_us": 24.409964680671692,
+      "gflops": 12.081623380369631,
+      "roofline": 0.0006195704297625452
+    },
+    {
+      "group": "merge",
+      "name": "eigh",
+      "n": 32,
+      "batch": 64,
+      "seconds": 0.00038939714431762695,
+      "compile_s": 0.063,
+      "per_item_us": 6.084330379962921,
+      "gflops": 48.470740670364,
+      "roofline": 0.0024856790087366154
+    },
+    {
+      "group": "merge",
+      "name": "eigh",
+      "n": 128,
+      "batch": 16,
+      "seconds": 0.0016704164445400238,
+      "compile_s": 0.081,
+      "per_item_us": 104.40102778375149,
+      "gflops": 180.7871857267053,
+      "roofline": 0.00927113772957463
+    },
+    {
+      "group": "merge",
+      "name": "eigh",
+      "n": 128,
+      "batch": 64,
+      "seconds": 0.002433221787214279,
+      "compile_s": 0.093,
+      "per_item_us": 38.01909042522311,
+      "gflops": 496.44449114643004,
+      "roofline": 0.02545869185366308
+    },
+    {
+      "group": "merge",
+      "name": "qr_1120x32",
+      "n": 32,
+      "batch": 16,
+      "seconds": 0.008338015526533127,
+      "compile_s": 0.061,
+      "per_item_us": 521.1259704083204,
+      "gflops": 8.803092266550289,
+      "roofline": 0.000451440629053861
+    },
+    {
+      "group": "merge",
+      "name": "gram_orth_1120x32",
+      "n": 32,
+      "batch": 16,
+      "seconds": 0.00043918192386627197,
+      "compile_s": 0.628,
+      "per_item_us": 27.448870241642,
+      "gflops": 167.12964721733383,
+      "roofline": 0.008570751139350453
+    },
+    {
+      "group": "merge",
+      "name": "qr_1120x32",
+      "n": 32,
+      "batch": 64,
+      "seconds": 0.012327991425991058,
+      "compile_s": 0.06,
+      "per_item_us": 192.6248660311103,
+      "gflops": 23.815824480620705,
+      "roofline": 0.0012213243323395233
+    },
+    {
+      "group": "merge",
+      "name": "gram_orth_1120x32",
+      "n": 32,
+      "batch": 64,
+      "seconds": 0.0004897043108940125,
+      "compile_s": 0.888,
+      "per_item_us": 7.6516298577189445,
+      "gflops": 599.5480812982769,
+      "roofline": 0.030746055451193684
+    },
+    {
+      "group": "merge",
+      "name": "qr_1120x128",
+      "n": 128,
+      "batch": 16,
+      "seconds": 0.08844276890158653,
+      "compile_s": 0.064,
+      "per_item_us": 5527.673056349158,
+      "gflops": 13.27870140866805,
+      "roofline": 0.0006809590465983615
+    },
+    {
+      "group": "merge",
+      "name": "gram_orth_1120x128",
+      "n": 128,
+      "batch": 16,
+      "seconds": 0.001481667160987854,
+      "compile_s": 0.957,
+      "per_item_us": 92.60419756174088,
+      "gflops": 792.6241135134582,
+      "roofline": 0.0406473904365876
+    },
+    {
+      "group": "merge",
+      "name": "qr_1120x128",
+      "n": 128,
+      "batch": 64,
+      "seconds": 0.1859217919409275,
+      "compile_s": 0.062,
+      "per_item_us": 2905.0279990769923,
+      "gflops": 25.266648040336037,
+      "roofline": 0.0012957255405300532
+    },
+    {
+      "group": "merge",
+      "name": "gram_orth_1120x128",
+      "n": 128,
+      "batch": 64,
+      "seconds": 0.002326030284166336,
+      "compile_s": 0.911,
+      "per_item_us": 36.344223190099,
+      "gflops": 2019.586981294896,
+      "roofline": 0.103568563143328
+    },
+    {
+      "group": "coupling",
+      "name": "K_scatter",
+      "n": 28,
+      "batch": 2600,
+      "seconds": 8.067861199378967e-05,
+      "compile_s": 0.071,
+      "per_item_us": 0.0310302353822268
+    },
+    {
+      "group": "coupling",
+      "name": "Kt_gather",
+      "n": 28,
+      "batch": 2600,
+      "seconds": 8.20159912109375e-05,
+      "compile_s": 0.067,
+      "per_item_us": 0.03154461200420673
+    },
+    {
+      "group": "coupling",
+      "name": "K_scatter",
+      "n": 28,
+      "batch": 26000,
+      "seconds": 0.0001286640763282776,
+      "compile_s": 0.09,
+      "per_item_us": 0.004948618320318368
+    },
+    {
+      "group": "coupling",
+      "name": "Kt_gather",
+      "n": 28,
+      "batch": 26000,
+      "seconds": 7.920712232589722e-05,
+      "compile_s": 0.081,
+      "per_item_us": 0.0030464277817652775
+    }
+  ],
+  "verdicts": [
+    {
+      "group": "chol",
+      "name": "cholesky",
+      "n": 30,
+      "batches": [
+        2600,
+        10400
+      ],
+      "per_item_us": [
+        0.10794315200585586,
+        0.07846535971531501
+      ],
+      "per_item_ratio": 0.7269137342872692,
+      "roofline_at_largest": 0.005882066471281054,
+      "seconds_at_largest": 0.0008160397410392761,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_vec",
+      "n": 30,
+      "batches": [
+        2600,
+        10400
+      ],
+      "per_item_us": [
+        0.17667619081643912,
+        0.12621176070891893
+      ],
+      "per_item_ratio": 0.7143676809290557,
+      "roofline_at_largest": 0.004388229359413536,
+      "seconds_at_largest": 0.001312602311372757,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_mat",
+      "n": 30,
+      "batches": [
+        2600,
+        10400
+      ],
+      "per_item_us": [
+        0.2918163171181312,
+        0.23524778393598703
+      ],
+      "per_item_ratio": 0.8061502052359721,
+      "roofline_at_largest": 0.013733473602660381,
+      "seconds_at_largest": 0.002446576952934265,
+      "err_max": null,
+      "verdict": "NOT BATCHED?"
+    },
+    {
+      "group": "chol",
+      "name": "matmul",
+      "n": 30,
+      "batches": [
+        2600,
+        10400
+      ],
+      "per_item_us": [
+        0.046024528833536,
+        0.01770193473650859
+      ],
+      "per_item_ratio": 0.38461957536890606,
+      "roofline_at_largest": 0.15643661613549445,
+      "seconds_at_largest": 0.00018410012125968933,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "chol",
+      "name": "cholesky",
+      "n": 136,
+      "batches": [
+        2600,
+        10400
+      ],
+      "per_item_us": [
+        1.3299028460796063,
+        1.2720587591712291
+      ],
+      "per_item_ratio": 0.9565050281087114,
+      "roofline_at_largest": 0.0338028786431711,
+      "seconds_at_largest": 0.013229411095380783,
+      "err_max": null,
+      "verdict": "NOT BATCHED?"
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_vec",
+      "n": 136,
+      "batches": [
+        2600,
+        10400
+      ],
+      "per_item_us": [
+        1.7455950952493229,
+        1.5817356940645437
+      ],
+      "per_item_ratio": 0.9061297768132334,
+      "roofline_at_largest": 0.028384181802779428,
+      "seconds_at_largest": 0.016450051218271255,
+      "err_max": null,
+      "verdict": "NOT BATCHED?"
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_mat",
+      "n": 136,
+      "batches": [
+        2600,
+        10400
+      ],
+      "per_item_us": [
+        5.557860892552595,
+        4.782847916850677
+      ],
+      "per_item_ratio": 0.8605555283435723,
+      "roofline_at_largest": 0.06293211498159627,
+      "seconds_at_largest": 0.04974161833524704,
+      "err_max": null,
+      "verdict": "NOT BATCHED?"
+    },
+    {
+      "group": "chol",
+      "name": "matmul",
+      "n": 136,
+      "batches": [
+        2600,
+        10400
+      ],
+      "per_item_us": [
+        0.8527647990446825,
+        0.7530738814519001
+      ],
+      "per_item_ratio": 0.8830968190707895,
+      "roofline_at_largest": 0.34258987535470076,
+      "seconds_at_largest": 0.007831968367099762,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "chol",
+      "name": "cholesky",
+      "n": 560,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        77.04249583184719,
+        38.10663474723697
+      ],
+      "per_item_ratio": 0.4946183834751205,
+      "roofline_at_largest": 0.0787784837442402,
+      "seconds_at_largest": 0.002438824623823166,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_vec",
+      "n": 560,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        152.57857739925385,
+        63.90537600964308
+      ],
+      "per_item_ratio": 0.4188358359274858,
+      "roofline_at_largest": 0.047478744324877566,
+      "seconds_at_largest": 0.004089944064617157,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_mat",
+      "n": 560,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        225.4860009998083,
+        142.8839168511331
+      ],
+      "per_item_ratio": 0.6336708984929604,
+      "roofline_at_largest": 0.147069598909261,
+      "seconds_at_largest": 0.009144570678472519,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "chol",
+      "name": "matmul",
+      "n": 560,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        34.47383642196655,
+        29.206799808889627
+      ],
+      "per_item_ratio": 0.8472164064188459,
+      "roofline_at_largest": 0.6167021910567273,
+      "seconds_at_largest": 0.0018692351877689362,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "chol",
+      "name": "cholesky",
+      "n": 960,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        222.0196183770895,
+        116.89332313835621
+      ],
+      "per_item_ratio": 0.5264999732583028,
+      "roofline_at_largest": 0.12938029223270298,
+      "seconds_at_largest": 0.007481172680854797,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_vec",
+      "n": 960,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        385.6720868498087,
+        162.68511535599828
+      ],
+      "per_item_ratio": 0.4218223742475621,
+      "roofline_at_largest": 0.09354399356888848,
+      "seconds_at_largest": 0.01041184738278389,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "chol",
+      "name": "cholesky_solve_mat",
+      "n": 960,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        608.1818137317896,
+        386.2278535962105
+      ],
+      "per_item_ratio": 0.6350532766284563,
+      "roofline_at_largest": 0.27410204926474746,
+      "seconds_at_largest": 0.02471858263015747,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "chol",
+      "name": "matmul",
+      "n": 960,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        129.21332381665707,
+        100.90909199789166
+      ],
+      "per_item_ratio": 0.7809495879935203,
+      "roofline_at_largest": 0.8992465599437736,
+      "seconds_at_largest": 0.0064581818878650665,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "merge",
+      "name": "eigh",
+      "n": 32,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        24.409964680671692,
+        6.084330379962921
+      ],
+      "per_item_ratio": 0.24925600915681037,
+      "roofline_at_largest": 0.0024856790087366154,
+      "seconds_at_largest": 0.00038939714431762695,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "merge",
+      "name": "eigh",
+      "n": 128,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        104.40102778375149,
+        38.01909042522311
+      ],
+      "per_item_ratio": 0.36416394773404936,
+      "roofline_at_largest": 0.02545869185366308,
+      "seconds_at_largest": 0.002433221787214279,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "merge",
+      "name": "qr_1120x32",
+      "n": 32,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        521.1259704083204,
+        192.6248660311103
+      ],
+      "per_item_ratio": 0.3696320601335258,
+      "roofline_at_largest": 0.0012213243323395233,
+      "seconds_at_largest": 0.012327991425991058,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "merge",
+      "name": "gram_orth_1120x32",
+      "n": 32,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        27.448870241642,
+        7.6516298577189445
+      ],
+      "per_item_ratio": 0.2787593729854443,
+      "roofline_at_largest": 0.030746055451193684,
+      "seconds_at_largest": 0.0004897043108940125,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "merge",
+      "name": "qr_1120x128",
+      "n": 128,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        5527.673056349158,
+        2905.0279990769923
+      ],
+      "per_item_ratio": 0.5255426595355959,
+      "roofline_at_largest": 0.0012957255405300532,
+      "seconds_at_largest": 0.1859217919409275,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "merge",
+      "name": "gram_orth_1120x128",
+      "n": 128,
+      "batches": [
+        16,
+        64
+      ],
+      "per_item_us": [
+        92.60419756174088,
+        36.344223190099
+      ],
+      "per_item_ratio": 0.39246842094676815,
+      "roofline_at_largest": 0.103568563143328,
+      "seconds_at_largest": 0.002326030284166336,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "coupling",
+      "name": "K_scatter",
+      "n": 28,
+      "batches": [
+        2600,
+        26000
+      ],
+      "per_item_us": [
+        0.0310302353822268,
+        0.004948618320318368
+      ],
+      "per_item_ratio": 0.1594773052592695,
+      "roofline_at_largest": null,
+      "seconds_at_largest": 0.0001286640763282776,
+      "err_max": null,
+      "verdict": "batched"
+    },
+    {
+      "group": "coupling",
+      "name": "Kt_gather",
+      "n": 28,
+      "batches": [
+        2600,
+        26000
+      ],
+      "per_item_us": [
+        0.03154461200420673,
+        0.0030464277817652775
+      ],
+      "per_item_ratio": 0.0965752180232558,
+      "roofline_at_largest": null,
+      "seconds_at_largest": 7.920712232589722e-05,
+      "err_max": null,
+      "verdict": "batched"
+    }
+  ]
+}

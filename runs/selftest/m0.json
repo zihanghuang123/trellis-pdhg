@@ -1,0 +1,121 @@
+{
+  "ok": true,
+  "results": [
+    {
+      "name": "M0 geometry and limit surface",
+      "ok": true,
+      "msg": "tangents counter-clockwise; rbar 0.06737 m (changes 2.9e-07 at 2x grid), f_max 0.4905 N, tau_max 0.03304 N m",
+      "seconds": 0.05
+    },
+    {
+      "name": "M0 friction sign (force on the slider along the pusher's slide)",
+      "ok": true,
+      "msg": "slide_pos drags the slider toward +t_j and slide_neg toward -t_j on every face; each fails the opposite type",
+      "seconds": 0.003
+    },
+    {
+      "name": "M0 torque sign",
+      "ok": true,
+      "msg": "a +x push on face 2 above its center turns the slider clockwise, below it counter-clockwise",
+      "seconds": 0.0
+    },
+    {
+      "name": "M0 true steps satisfy the constraint table",
+      "ok": true,
+      "msg": "worst violation over 700 random true steps 2.6e-16 (c0_slide_pos rot_rel)",
+      "seconds": 0.158
+    },
+    {
+      "name": "M0 constraint table degrees and rows",
+      "ok": true,
+      "msg": "110 edge types: every row and cost has degree <= 2 and carries the rows of its mode",
+      "seconds": 0.013
+    },
+    {
+      "name": "M0 mode graph (plan 4.4)",
+      "ok": true,
+      "msg": "20 modes, 84 transitions per layer, symmetric, matching plan 4.4 entry by entry",
+      "seconds": 0.001
+    },
+    {
+      "name": "M0 trellis counts",
+      "ok": true,
+      "msg": "2546 edges (6 start, 20 goal), 622 vertices; adjacent layers only, in order",
+      "seconds": 0.0
+    },
+    {
+      "name": "M0 flow and coupling signs",
+      "ok": true,
+      "msg": "unit flow on a path conserves flow with beta_s = -1, beta_t = +1 (head +, tail -); breaking the path breaks it at both ends",
+      "seconds": 0.0
+    },
+    {
+      "name": "M0 pruning soundness, tiny",
+      "ok": true,
+      "msg": "2 edge types LP-infeasible (each misses feasibility by > 1e-07); 104 edges off every start->goal path; 138 of 244 edges kept",
+      "seconds": 0.05
+    },
+    {
+      "name": "M0 pruning soundness, full",
+      "ok": true,
+      "msg": "2 edge types LP-infeasible (each misses feasibility by > 1e-07); 204 edges off every start->goal path; 2340 of 2546 edges kept",
+      "seconds": 0.051
+    },
+    {
+      "name": "M0 hand-scripted push, tiny",
+      "ok": true,
+      "msg": "N=8, 10 modes: valid start->goal path, worst residual 5.6e-17, J_hand = 0.066059 (strip_2 -> c2_stick x7 -> goal)",
+      "seconds": 0.002
+    },
+    {
+      "name": "M0 hand-scripted push, full",
+      "ok": true,
+      "msg": "N=32, 20 modes: valid start->goal path, worst residual 1.1e-16, J_hand = 0.053800 (strip_2 -> c2_stick x31 -> goal)",
+      "seconds": 0.009
+    }
+  ],
+  "record": {
+    "J_hand_N8_10modes": 0.06605901723174551,
+    "J_hand_N32_20modes": 0.05380042324587832
+  },
+  "tiny": {
+    "task": "T1_push_straight",
+    "N": 8,
+    "modes": 10,
+    "transitions_per_layer": 38,
+    "vertices": 72,
+    "edges": 244,
+    "edges_by_kind": {
+      "start": 6,
+      "mid": 228,
+      "goal": 10
+    },
+    "edges_after_lp": 242,
+    "edges_alive": 138,
+    "types": 54,
+    "types_lp_infeasible": 2,
+    "types_used": 32,
+    "types_lp_trouble": [],
+    "lp_seconds": 0.31
+  },
+  "full": {
+    "task": "T1_push_straight",
+    "N": 32,
+    "modes": 20,
+    "transitions_per_layer": 84,
+    "vertices": 622,
+    "edges": 2546,
+    "edges_by_kind": {
+      "start": 6,
+      "mid": 2520,
+      "goal": 20
+    },
+    "edges_after_lp": 2544,
+    "edges_alive": 2340,
+    "types": 110,
+    "types_lp_infeasible": 2,
+    "types_used": 108,
+    "types_lp_trouble": [],
+    "lp_seconds": 0.45
+  }
+}

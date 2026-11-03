@@ -1,0 +1,1314 @@
+{
+  "ok": true,
+  "results": [
+    {
+      "name": "M1 moment basis: sizes, order, index tables, interval box",
+      "ok": true,
+      "msg": "kappa 1: 136 moments, 16 x 16, tables good to 0e+00; kappa 2: 3876 moments, 136 x 136, tables good to 2e-16; kappa 3: 54264 moments, 816 x 816, tables good to 3e-16; interval box holds on random points and is exact on hand cases",
+      "seconds": 0.143
+    },
+    {
+      "name": "M1 sampler against the scalar true step",
+      "ok": true,
+      "msg": "833 samples over 12 contact modes match the scalar true step to 4.4e-16",
+      "seconds": 0.039
+    },
+    {
+      "name": "M1 region copies hold every true step",
+      "ok": true,
+      "msg": "1440 transitions per layer at 8 theta regions; 8000 random true steps all have an allowed pair of copies",
+      "seconds": 0.023
+    },
+    {
+      "name": "M1 lifted rows match their polynomials, kappa 1",
+      "ok": true,
+      "msg": "108 edge types: lifted rows, blocks and costs match at random points to 7.1e-15; the rows kept span the raw rows",
+      "seconds": 0.093
+    },
+    {
+      "name": "M1 lifted rows match their polynomials, kappa 2",
+      "ok": true,
+      "msg": "108 edge types: lifted rows, blocks and costs match at random points to 7.1e-15",
+      "seconds": 0.162
+    },
+    {
+      "name": "M1 lifted rows match their polynomials, kappa 3 (3 edge types)",
+      "ok": true,
+      "msg": "3 edge types: lifted rows, blocks and costs match at random points to 7.1e-15",
+      "seconds": 0.373
+    },
+    {
+      "name": "M1 validity 5.4, SDP kappa 1",
+      "ok": true,
+      "msg": "180 edge types, 1800000 true samples (fewest on a sampled type: 10000); worst box 1.7e-18, cost 7.5e-16, coupling 0.0e+00, eq 3.9e-16, ge 2.2e-16, psd_bound 0.0e+00, psd_eig 3.0e-15, table 3.9e-16",
+      "seconds": 2.272
+    },
+    {
+      "name": "M1 validity 5.4, SDP kappa 2",
+      "ok": true,
+      "msg": "180 edge types, 1800000 true samples (fewest on a sampled type: 10000); worst box 2.8e-17, cost 7.5e-16, coupling 0.0e+00, eq 3.9e-16, ge 2.2e-16, psd_bound 9.2e-14, psd_eig 1.1e-14, table 3.9e-16",
+      "seconds": 66.734
+    },
+    {
+      "name": "M1 validity 5.4, SDP kappa 3",
+      "ok": true,
+      "msg": "180 edge types, 36000 true samples (fewest on a sampled type: 200); worst box 2.8e-17, cost 6.1e-16, coupling 0.0e+00, eq 3.5e-16, ge 2.2e-16, psd_bound 7.2e-13, psd_eig 2.7e-14, table 3.5e-16",
+      "seconds": 34.315
+    },
+    {
+      "name": "M1 validity 5.4, SDP kappa 1 with theta regions (A-reg)",
+      "ok": true,
+      "msg": "1616 edge types, 16160000 true samples (fewest on a sampled type: 10000); worst box 2.4e-16, cost 9.7e-16, coupling 0.0e+00, eq 4.4e-16, ge 2.8e-16, psd_bound 0.0e+00, psd_eig 3.4e-15, table 4.4e-16",
+      "seconds": 15.867
+    },
+    {
+      "name": "M1 validity 5.4, Taylor bands (B)",
+      "ok": true,
+      "msg": "1616 edge types, 16160000 true samples (fewest on a sampled type: 10000); worst box 6.7e-16, cost 4.3e-16, coupling 2.4e-16, eq 9.7e-17, ge 5.6e-16, table 4.4e-16",
+      "seconds": 2.874
+    },
+    {
+      "name": "M1 validity 5.4, Taylor McCormick",
+      "ok": true,
+      "msg": "1528 edge types, 15280000 true samples (fewest on a sampled type: 10000); worst box 6.7e-16, cost 4.3e-16, coupling 2.4e-16, eq 9.7e-17, ge 5.6e-16, table 4.4e-16",
+      "seconds": 2.427
+    },
+    {
+      "name": "M1 validity 5.4, Taylor SOC costs",
+      "ok": true,
+      "msg": "1528 edge types, 15280000 true samples (fewest on a sampled type: 10000); worst box 6.7e-16, cost 4.3e-16, coupling 2.4e-16, eq 9.7e-17, ge 5.0e-16, soc 4.7e-16, table 4.4e-16",
+      "seconds": 2.434
+    },
+    {
+      "name": "M1 negative controls, SDP kappa 1",
+      "ok": true,
+      "msg": "flagged: torque 4.6e-02, translation 2.0e-01, contact line 1.0e-03, friction 5.0e-01, static slider 1.0e-03, zero force 1.0e-03, unit norm 2.0e-02",
+      "seconds": 0.022
+    },
+    {
+      "name": "M1 negative controls, SDP kappa 2",
+      "ok": true,
+      "msg": "flagged: torque 4.6e-02, translation 2.0e-01, contact line 1.0e-03, friction 5.0e-01, static slider 1.0e-03, zero force 1.0e-03, unit norm 2.1e-02, localizing block 4.6e+00",
+      "seconds": 0.088
+    },
+    {
+      "name": "M1 negative controls, Taylor",
+      "ok": true,
+      "msg": "flagged: torque 4.6e-02, translation 1.7e-01, contact line 1.0e-03, friction 5.0e-01, static slider 1.0e-03, zero force 1.0e-03",
+      "seconds": 0.015
+    },
+    {
+      "name": "M1 coupling and cost along the hand push, SDP kappa 1",
+      "ok": true,
+      "msg": "32 steps, q = 28: coupling mismatch 0.0e+00, row violation 1.1e-16, linear cost 0.053800 vs J_hand 0.053800",
+      "seconds": 0.056
+    },
+    {
+      "name": "M1 coupling and cost along the hand push, SDP kappa 2",
+      "ok": true,
+      "msg": "32 steps, q = 28: coupling mismatch 0.0e+00, row violation 1.1e-16, linear cost 0.053800 vs J_hand 0.053800",
+      "seconds": 0.204
+    },
+    {
+      "name": "M1 coupling and cost along the hand push, Taylor",
+      "ok": true,
+      "msg": "32 steps, q = 6: coupling mismatch 0.0e+00, row violation 1.1e-16, linear cost 0.053800 vs J_hand 0.053800",
+      "seconds": 0.058
+    },
+    {
+      "name": "M1 Taylor bands and region sizing",
+      "ok": true,
+      "msg": "bands within the formula (translation 3.868e-02 m, torque 2.500e-02 N m, rotation 2.980e-03 rad); doubling fine regions scales translation by 0.497; sizing target needs 235 theta and 250 lambda splits",
+      "seconds": 0.977
+    },
+    {
+      "name": "M1 Taylor feasibility pruning",
+      "ok": true,
+      "msg": "0 of 1484 LP-alive edge types pruned, none holding a true sample; 34028 of 43246 edges kept",
+      "seconds": 0.99
+    },
+    {
+      "name": "M1 sizes per group of edge types (plan 5.1.7)",
+      "ok": true,
+      "msg": "printed above",
+      "seconds": 1.716
+    }
+  ],
+  "record": {
+    "sdp_k1": {
+      "types": 180,
+      "samples": 1800000,
+      "worst": {
+        "table": [
+          3.885780586188048e-16,
+          "mid c0_stick -> c0_stick: rot_rel"
+        ],
+        "eq": [
+          3.885780586188048e-16,
+          "mid c0_stick -> c0_stick: rot_rel"
+        ],
+        "ge": [
+          2.220446049250313e-16,
+          "mid c0_stick -> c0_stick: rot_step"
+        ],
+        "box": [
+          1.734723475976807e-18,
+          "mid c0_stick -> c0_stick: m[15]"
+        ],
+        "cost": [
+          7.494005416219807e-16,
+          "mid c3_slide_neg -> c3_stick"
+        ],
+        "coupling": [
+          0.0,
+          "start strip_2 -> c2_stick"
+        ],
+        "psd_bound": [
+          0.0,
+          "start strip_2 -> c2_stick: moment"
+        ],
+        "psd_eig": [
+          2.9731746529730354e-15,
+          "mid c0_stick -> c0_slide_pos: moment"
+        ]
+      },
+      "no_true_point": []
+    },
+    "sdp_k2": {
+      "types": 180,
+      "samples": 1800000,
+      "worst": {
+        "table": [
+          3.885780586188048e-16,
+          "mid c0_stick -> c0_stick: rot_rel"
+        ],
+        "eq": [
+          3.885780586188048e-16,
+          "mid c0_stick -> c0_stick: rot_rel"
+        ],
+        "ge": [
+          2.220446049250313e-16,
+          "mid c0_stick -> c0_stick: rot_step"
+        ],
+        "box": [
+          2.7755575615628914e-17,
+          "mid c0_stick -> c0_stick: m[136]"
+        ],
+        "cost": [
+          7.494005416219807e-16,
+          "mid c3_slide_neg -> c3_stick"
+        ],
+        "coupling": [
+          0.0,
+          "start strip_2 -> c2_stick"
+        ],
+        "psd_bound": [
+          9.237055564881302e-14,
+          "mid c0_stick -> c0_slide_pos: ball"
+        ],
+        "psd_eig": [
+          1.0636144444885593e-14,
+          "mid c0_slide_neg -> c0_slide_pos: ball"
+        ]
+      },
+      "no_true_point": []
+    },
+    "sdp_k3": {
+      "types": 180,
+      "samples": 36000,
+      "worst": {
+        "table": [
+          3.469446951953614e-16,
+          "mid c0_slide_pos -> strip_0: rot_rel"
+        ],
+        "eq": [
+          3.544256901855114e-16,
+          "mid c0_slide_pos -> strip_0: unit_norm_0"
+        ],
+        "ge": [
+          2.220446049250313e-16,
+          "mid c0_slide_neg -> c0_stick: rot_step"
+        ],
+        "box": [
+          2.7755575615628914e-17,
+          "mid c0_stick -> c0_stick: m[136]"
+        ],
+        "cost": [
+          6.106226635438361e-16,
+          "mid c3_slide_pos -> c3_slide_neg"
+        ],
+        "coupling": [
+          0.0,
+          "start strip_2 -> c2_stick"
+        ],
+        "psd_bound": [
+          7.247535904753022e-13,
+          "mid corner_3 -> strip_0: ball"
+        ],
+        "psd_eig": [
+          2.6933663684858104e-14,
+          "mid strip_0 -> strip_0: moment"
+        ]
+      },
+      "no_true_point": []
+    },
+    "sdp_k1_regions": {
+      "types": 1616,
+      "samples": 16160000,
+      "worst": {
+        "table": [
+          4.440892098500626e-16,
+          "mid c0_stick_th0 -> c0_stick_th1: rot_rel"
+        ],
+        "eq": [
+          4.440892098500626e-16,
+          "mid c0_stick_th0 -> c0_stick_th1: rot_rel"
+        ],
+        "ge": [
+          2.7755575615628914e-16,
+          "mid c0_stick_th1 -> c0_slide_neg_th0: rot_step"
+        ],
+        "box": [
+          2.4492935982947064e-16,
+          "mid c0_stick_th0 -> c0_stick_th7: m[10]"
+        ],
+        "cost": [
+          9.71445146547012e-16,
+          "mid c1_slide_neg_th0 -> c1_stick_th7"
+        ],
+        "coupling": [
+          0.0,
+          "start strip_2_th4 -> c2_stick_th4"
+        ],
+        "psd_bound": [
+          0.0,
+          "start strip_2_th4 -> c2_stick_th4: moment"
+        ],
+        "psd_eig": [
+          3.4390012534057932e-15,
+          "mid c0_slide_neg_th4 -> strip_0_th3: moment"
+        ]
+      },
+      "no_true_point": []
+    },
+    "taylor_band": {
+      "types": 1616,
+      "samples": 16160000,
+      "worst": {
+        "table": [
+          4.440892098500626e-16,
+          "mid c0_stick_th0 -> c0_stick_th1: rot_rel"
+        ],
+        "eq": [
+          9.71445146547012e-17,
+          "mid strip_0_th3 -> c0_slide_neg_th3: contact_line_head"
+        ],
+        "ge": [
+          5.551115123125783e-16,
+          "mid c0_slide_pos_th7 -> c0_stick_th6: plane_dth"
+        ],
+        "box": [
+          6.661338147750939e-16,
+          "mid c0_slide_pos_th1 -> c0_slide_neg_th0: m[16]"
+        ],
+        "cost": [
+          4.3021142204224816e-16,
+          "mid c0_slide_neg_th6 -> c0_slide_pos_th5"
+        ],
+        "coupling": [
+          2.4492935982947064e-16,
+          "mid c0_stick_th0 -> c0_stick_th7"
+        ]
+      },
+      "no_true_point": []
+    },
+    "taylor_mccormick": {
+      "types": 1528,
+      "samples": 15280000,
+      "worst": {
+        "table": [
+          4.440892098500626e-16,
+          "mid c0_stick_th0 -> c0_stick_th1: rot_rel"
+        ],
+        "eq": [
+          9.71445146547012e-17,
+          "mid strip_0_th3 -> c0_slide_neg_th3: contact_line_head"
+        ],
+        "ge": [
+          5.551115123125783e-16,
+          "mid c0_slide_pos_th7 -> c0_stick_th6: plane_dth"
+        ],
+        "box": [
+          6.661338147750939e-16,
+          "mid c0_slide_pos_th1 -> c0_slide_neg_th0: m[16]"
+        ],
+        "cost": [
+          4.3021142204224816e-16,
+          "mid c0_slide_neg_th6 -> c0_slide_pos_th5"
+        ],
+        "coupling": [
+          2.4492935982947064e-16,
+          "mid c0_stick_th0 -> c0_stick_th7"
+        ]
+      },
+      "no_true_point": []
+    },
+    "taylor_soc": {
+      "types": 1528,
+      "samples": 15280000,
+      "worst": {
+        "table": [
+          4.440892098500626e-16,
+          "mid c0_stick_th0 -> c0_stick_th1: rot_rel"
+        ],
+        "eq": [
+          9.71445146547012e-17,
+          "mid strip_0_th3 -> c0_slide_neg_th3: contact_line_head"
+        ],
+        "ge": [
+          4.996003610813204e-16,
+          "mid c3_slide_neg_th7 -> c3_slide_neg_th0: rot_rel_hi"
+        ],
+        "box": [
+          6.661338147750939e-16,
+          "mid c0_slide_pos_th1 -> c0_slide_neg_th0: m[16]"
+        ],
+        "cost": [
+          4.3021142204224816e-16,
+          "mid c0_slide_neg_th6 -> c0_slide_pos_th5"
+        ],
+        "coupling": [
+          2.4492935982947064e-16,
+          "mid c0_stick_th0 -> c0_stick_th7"
+        ],
+        "soc": [
+          4.718447854656915e-16,
+          "mid c0_stick_th2 -> c0_slide_neg_th3: z[15]"
+        ]
+      },
+      "no_true_point": []
+    },
+    "sizes": {
+      "sdp_k1": {
+        "start": {
+          "free": [
+            90,
+            90
+          ],
+          "eq_raw": [
+            211,
+            227
+          ],
+          "eq": [
+            130,
+            133
+          ],
+          "ge": [
+            10,
+            11
+          ],
+          "rows": [
+            141,
+            143
+          ],
+          "nnz": [
+            201,
+            205
+          ]
+        },
+        "mid, contact -> contact": {
+          "free": [
+            135,
+            135
+          ],
+          "eq_raw": [
+            54,
+            70
+          ],
+          "eq": [
+            51,
+            51
+          ],
+          "ge": [
+            12,
+            13
+          ],
+          "rows": [
+            63,
+            64
+          ],
+          "nnz": [
+            139,
+            141
+          ]
+        },
+        "mid, contact -> free": {
+          "free": [
+            135,
+            135
+          ],
+          "eq_raw": [
+            54,
+            70
+          ],
+          "eq": [
+            51,
+            51
+          ],
+          "ge": [
+            15,
+            16
+          ],
+          "rows": [
+            66,
+            67
+          ],
+          "nnz": [
+            145,
+            147
+          ]
+        },
+        "mid, free -> contact": {
+          "free": [
+            90,
+            90
+          ],
+          "eq_raw": [
+            131,
+            131
+          ],
+          "eq": [
+            101,
+            101
+          ],
+          "ge": [
+            10,
+            10
+          ],
+          "rows": [
+            111,
+            111
+          ],
+          "nnz": [
+            185,
+            185
+          ]
+        },
+        "mid, free -> free": {
+          "free": [
+            90,
+            90
+          ],
+          "eq_raw": [
+            115,
+            115
+          ],
+          "eq": [
+            92,
+            92
+          ],
+          "ge": [
+            11,
+            11
+          ],
+          "rows": [
+            103,
+            103
+          ],
+          "nnz": [
+            169,
+            171
+          ]
+        },
+        "goal, contact tail": {
+          "free": [
+            135,
+            135
+          ],
+          "eq_raw": [
+            118,
+            134
+          ],
+          "eq": [
+            96,
+            96
+          ],
+          "ge": [
+            12,
+            13
+          ],
+          "rows": [
+            108,
+            109
+          ],
+          "nnz": [
+            199,
+            199
+          ]
+        },
+        "goal, free tail": {
+          "free": [
+            90,
+            90
+          ],
+          "eq_raw": [
+            179,
+            179
+          ],
+          "eq": [
+            121,
+            121
+          ],
+          "ge": [
+            8,
+            8
+          ],
+          "rows": [
+            129,
+            129
+          ],
+          "nnz": [
+            196,
+            197
+          ]
+        }
+      },
+      "sdp_k2": {
+        "start": {
+          "free": [
+            1819,
+            1819
+          ],
+          "eq_raw": [
+            11016,
+            11832
+          ],
+          "eq": [
+            8685,
+            9501
+          ],
+          "ge": [
+            11,
+            12
+          ],
+          "rows": [
+            8697,
+            9512
+          ],
+          "nnz": [
+            14440,
+            16070
+          ]
+        },
+        "mid, contact -> contact": {
+          "free": [
+            3875,
+            3875
+          ],
+          "eq_raw": [
+            3264,
+            4080
+          ],
+          "eq": [
+            3264,
+            4080
+          ],
+          "ge": [
+            13,
+            14
+          ],
+          "rows": [
+            3277,
+            4094
+          ],
+          "nnz": [
+            7796,
+            9430
+          ]
+        },
+        "mid, contact -> free": {
+          "free": [
+            3875,
+            3875
+          ],
+          "eq_raw": [
+            3264,
+            4080
+          ],
+          "eq": [
+            3264,
+            4080
+          ],
+          "ge": [
+            16,
+            17
+          ],
+          "rows": [
+            3280,
+            4097
+          ],
+          "nnz": [
+            7802,
+            9436
+          ]
+        },
+        "mid, free -> contact": {
+          "free": [
+            1819,
+            1819
+          ],
+          "eq_raw": [
+            6936,
+            6936
+          ],
+          "eq": [
+            6544,
+            6544
+          ],
+          "ge": [
+            11,
+            11
+          ],
+          "rows": [
+            6555,
+            6555
+          ],
+          "nnz": [
+            11481,
+            11481
+          ]
+        },
+        "mid, free -> free": {
+          "free": [
+            1819,
+            1819
+          ],
+          "eq_raw": [
+            6120,
+            6120
+          ],
+          "eq": [
+            5728,
+            5728
+          ],
+          "ge": [
+            12,
+            12
+          ],
+          "rows": [
+            5740,
+            5740
+          ],
+          "nnz": [
+            9851,
+            9853
+          ]
+        },
+        "goal, contact tail": {
+          "free": [
+            3875,
+            3875
+          ],
+          "eq_raw": [
+            6528,
+            7344
+          ],
+          "eq": [
+            6392,
+            7208
+          ],
+          "ge": [
+            13,
+            14
+          ],
+          "rows": [
+            6405,
+            7222
+          ],
+          "nnz": [
+            12556,
+            14190
+          ]
+        },
+        "goal, free tail": {
+          "free": [
+            1819,
+            1819
+          ],
+          "eq_raw": [
+            9384,
+            9384
+          ],
+          "eq": [
+            8179,
+            8179
+          ],
+          "ge": [
+            9,
+            9
+          ],
+          "rows": [
+            8188,
+            8188
+          ],
+          "nnz": [
+            13928,
+            13929
+          ]
+        }
+      },
+      "sdp_k3": {
+        "start": {
+          "free": [
+            18563,
+            18563
+          ],
+          "eq_raw": [
+            213180,
+            228684
+          ],
+          "eq": [
+            155913,
+            171417
+          ],
+          "ge": [
+            11,
+            12
+          ],
+          "rows": [
+            155925,
+            171428
+          ],
+          "nnz": [
+            272236,
+            303242
+          ]
+        },
+        "mid, contact -> contact": {
+          "free": [
+            54263,
+            54263
+          ],
+          "eq_raw": [
+            69768,
+            85272
+          ],
+          "eq": [
+            69768,
+            85272
+          ],
+          "ge": [
+            13,
+            14
+          ],
+          "rows": [
+            69781,
+            85286
+          ],
+          "nnz": [
+            174464,
+            205474
+          ]
+        },
+        "mid, contact -> free": {
+          "free": [
+            54263,
+            54263
+          ],
+          "eq_raw": [
+            69768,
+            85272
+          ],
+          "eq": [
+            69768,
+            85272
+          ],
+          "ge": [
+            16,
+            17
+          ],
+          "rows": [
+            69784,
+            85289
+          ],
+          "nnz": [
+            174470,
+            205480
+          ]
+        },
+        "mid, free -> contact": {
+          "free": [
+            18563,
+            18563
+          ],
+          "eq_raw": [
+            135660,
+            135660
+          ],
+          "eq": [
+            124848,
+            124848
+          ],
+          "ge": [
+            11,
+            11
+          ],
+          "rows": [
+            124859,
+            124859
+          ],
+          "nnz": [
+            225665,
+            225665
+          ]
+        },
+        "mid, free -> free": {
+          "free": [
+            18563,
+            18563
+          ],
+          "eq_raw": [
+            120156,
+            120156
+          ],
+          "eq": [
+            109344,
+            109344
+          ],
+          "ge": [
+            12,
+            12
+          ],
+          "rows": [
+            109356,
+            109356
+          ],
+          "nnz": [
+            194659,
+            194661
+          ]
+        },
+        "goal, contact tail": {
+          "free": [
+            54263,
+            54263
+          ],
+          "eq_raw": [
+            131784,
+            147288
+          ],
+          "eq": [
+            127908,
+            143412
+          ],
+          "ge": [
+            13,
+            14
+          ],
+          "rows": [
+            127921,
+            143426
+          ],
+          "nnz": [
+            263612,
+            294622
+          ]
+        },
+        "goal, free tail": {
+          "free": [
+            18563,
+            18563
+          ],
+          "eq_raw": [
+            182172,
+            182172
+          ],
+          "eq": [
+            150908,
+            150908
+          ],
+          "ge": [
+            9,
+            9
+          ],
+          "rows": [
+            150917,
+            150917
+          ],
+          "nnz": [
+            267225,
+            267226
+          ]
+        }
+      },
+      "sdp_k1_regions": {
+        "start": {
+          "free": [
+            90,
+            90
+          ],
+          "eq_raw": [
+            211,
+            227
+          ],
+          "eq": [
+            130,
+            133
+          ],
+          "ge": [
+            16,
+            17
+          ],
+          "rows": [
+            147,
+            149
+          ],
+          "nnz": [
+            213,
+            217
+          ]
+        },
+        "mid, contact -> contact": {
+          "free": [
+            135,
+            135
+          ],
+          "eq_raw": [
+            54,
+            70
+          ],
+          "eq": [
+            51,
+            51
+          ],
+          "ge": [
+            18,
+            19
+          ],
+          "rows": [
+            69,
+            70
+          ],
+          "nnz": [
+            151,
+            153
+          ]
+        },
+        "mid, contact -> free": {
+          "free": [
+            135,
+            135
+          ],
+          "eq_raw": [
+            54,
+            70
+          ],
+          "eq": [
+            51,
+            51
+          ],
+          "ge": [
+            21,
+            22
+          ],
+          "rows": [
+            72,
+            73
+          ],
+          "nnz": [
+            157,
+            159
+          ]
+        },
+        "mid, free -> contact": {
+          "free": [
+            90,
+            90
+          ],
+          "eq_raw": [
+            131,
+            131
+          ],
+          "eq": [
+            101,
+            101
+          ],
+          "ge": [
+            16,
+            16
+          ],
+          "rows": [
+            117,
+            117
+          ],
+          "nnz": [
+            197,
+            197
+          ]
+        },
+        "mid, free -> free": {
+          "free": [
+            90,
+            90
+          ],
+          "eq_raw": [
+            115,
+            115
+          ],
+          "eq": [
+            92,
+            92
+          ],
+          "ge": [
+            17,
+            17
+          ],
+          "rows": [
+            109,
+            109
+          ],
+          "nnz": [
+            181,
+            183
+          ]
+        },
+        "goal, contact tail": {
+          "free": [
+            135,
+            135
+          ],
+          "eq_raw": [
+            118,
+            134
+          ],
+          "eq": [
+            96,
+            96
+          ],
+          "ge": [
+            15,
+            16
+          ],
+          "rows": [
+            111,
+            112
+          ],
+          "nnz": [
+            205,
+            205
+          ]
+        },
+        "goal, free tail": {
+          "free": [
+            90,
+            90
+          ],
+          "eq_raw": [
+            179,
+            179
+          ],
+          "eq": [
+            121,
+            121
+          ],
+          "ge": [
+            11,
+            11
+          ],
+          "rows": [
+            132,
+            132
+          ],
+          "nnz": [
+            202,
+            203
+          ]
+        }
+      },
+      "taylor": {
+        "start": {
+          "free": [
+            12,
+            12
+          ],
+          "eq_raw": [
+            11,
+            12
+          ],
+          "eq": [
+            11,
+            12
+          ],
+          "ge": [
+            45,
+            46
+          ],
+          "rows": [
+            57,
+            57
+          ],
+          "nnz": [
+            181,
+            181
+          ]
+        },
+        "mid, contact -> contact": {
+          "free": [
+            20,
+            20
+          ],
+          "eq_raw": [
+            3,
+            4
+          ],
+          "eq": [
+            3,
+            3
+          ],
+          "ge": [
+            133,
+            134
+          ],
+          "rows": [
+            136,
+            137
+          ],
+          "nnz": [
+            491,
+            493
+          ]
+        },
+        "mid, contact -> free": {
+          "free": [
+            20,
+            20
+          ],
+          "eq_raw": [
+            3,
+            4
+          ],
+          "eq": [
+            3,
+            3
+          ],
+          "ge": [
+            136,
+            137
+          ],
+          "rows": [
+            139,
+            140
+          ],
+          "nnz": [
+            497,
+            499
+          ]
+        },
+        "mid, free -> contact": {
+          "free": [
+            12,
+            12
+          ],
+          "eq_raw": [
+            7,
+            7
+          ],
+          "eq": [
+            7,
+            7
+          ],
+          "ge": [
+            45,
+            45
+          ],
+          "rows": [
+            52,
+            52
+          ],
+          "nnz": [
+            175,
+            175
+          ]
+        },
+        "mid, free -> free": {
+          "free": [
+            12,
+            12
+          ],
+          "eq_raw": [
+            6,
+            6
+          ],
+          "eq": [
+            6,
+            6
+          ],
+          "ge": [
+            46,
+            46
+          ],
+          "rows": [
+            52,
+            52
+          ],
+          "nnz": [
+            175,
+            177
+          ]
+        },
+        "goal, contact tail": {
+          "free": [
+            20,
+            20
+          ],
+          "eq_raw": [
+            6,
+            7
+          ],
+          "eq": [
+            6,
+            6
+          ],
+          "ge": [
+            133,
+            134
+          ],
+          "rows": [
+            139,
+            140
+          ],
+          "nnz": [
+            495,
+            497
+          ]
+        },
+        "goal, free tail": {
+          "free": [
+            12,
+            12
+          ],
+          "eq_raw": [
+            9,
+            9
+          ],
+          "eq": [
+            9,
+            9
+          ],
+          "ge": [
+            43,
+            43
+          ],
+          "rows": [
+            52,
+            52
+          ],
+          "nnz": [
+            173,
+            174
+          ]
+        }
+      }
+    }
+  }
+}

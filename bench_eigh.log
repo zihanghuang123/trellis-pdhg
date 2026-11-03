@@ -1,0 +1,13 @@
+eigh n=  16 batch=  2600 float64  median     0.604 ms (    0.232 us/matrix), compile   0.19 s, residual 1.6e-14, orthogonality 7.5e-15
+eigh n=  16 batch=  2600 float32  median     0.456 ms (    0.175 us/matrix), compile   0.20 s, residual 4.1e-04, orthogonality 6.4e-04
+eigh n=  16 batch= 80000 float64  median    12.694 ms (    0.159 us/matrix), compile   0.22 s, residual 1.3e-14, orthogonality 7.8e-15
+eigh n=  16 batch= 80000 float32  median     8.807 ms (    0.110 us/matrix), compile   0.25 s, residual 5.3e-04, orthogonality 7.0e-04
+eigh n= 136 batch=  2600 float64  median   122.430 ms (   47.089 us/matrix), compile   0.21 s, residual 4.6e-15, orthogonality 4.2e-15
+eigh n= 136 batch=  2600 float32  median    75.421 ms (   29.008 us/matrix), compile   0.33 s, residual 3.1e-04, orthogonality 3.1e-04
+eigh n= 136 batch= 20000 float64  median   906.822 ms (   45.341 us/matrix), compile   0.28 s, residual 6.7e-15, orthogonality 4.7e-15
+eigh n= 136 batch= 20000 float32  median   540.164 ms (   27.008 us/matrix), compile   0.25 s, residual 2.8e-04, orthogonality 3.0e-04
+eigh n= 816 batch=    64 float64  median   168.828 ms ( 2637.937 us/matrix), compile   0.20 s, residual 1.6e-14, orthogonality 4.4e-15
+eigh n= 816 batch=    64 float32  median   141.608 ms ( 2212.623 us/matrix), compile   0.19 s, residual 2.8e-04, orthogonality 1.1e-04
+eigh n= 816 batch=   256 float64  median   539.476 ms ( 2107.328 us/matrix), compile   0.22 s, residual 1.5e-14, orthogonality 5.1e-15
+eigh n= 816 batch=   256 float32  median   449.020 ms ( 1753.984 us/matrix), compile   0.20 s, residual 2.8e-04, orthogonality 1.1e-04
+saved /scratch/residual-controller/trellis-pdhg/runs/bench/eigh.json

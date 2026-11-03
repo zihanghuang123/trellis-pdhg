@@ -1,0 +1,75 @@
+chol     cholesky             n=   30 batch=  2600      0.281 ms      0.108 us/item   0.43% of peak
+chol     cholesky_solve_vec   n=   30 batch=  2600      0.459 ms      0.177 us/item   0.31% of peak residual 5.9e-16
+chol     cholesky_solve_mat   n=   30 batch=  2600      0.759 ms      0.292 us/item   1.11% of peak
+chol     matmul               n=   30 batch=  2600      0.120 ms      0.046 us/item   6.02% of peak
+chol     cholesky             n=   30 batch= 10400      0.816 ms      0.078 us/item   0.59% of peak
+chol     cholesky_solve_vec   n=   30 batch= 10400      1.313 ms      0.126 us/item   0.44% of peak residual 7.3e-16
+chol     cholesky_solve_mat   n=   30 batch= 10400      2.447 ms      0.235 us/item   1.37% of peak
+chol     matmul               n=   30 batch= 10400      0.184 ms      0.018 us/item  15.64% of peak
+chol     cholesky             n=  136 batch=  2600      3.458 ms      1.330 us/item   3.23% of peak
+chol     cholesky_solve_vec   n=  136 batch=  2600      4.539 ms      1.746 us/item   2.57% of peak residual 5.4e-16
+chol     cholesky_solve_mat   n=  136 batch=  2600     14.450 ms      5.558 us/item   5.42% of peak
+chol     matmul               n=  136 batch=  2600      2.217 ms      0.853 us/item  30.25% of peak
+chol     cholesky             n=  136 batch= 10400     13.229 ms      1.272 us/item   3.38% of peak
+chol     cholesky_solve_vec   n=  136 batch= 10400     16.450 ms      1.582 us/item   2.84% of peak residual 5.7e-16
+chol     cholesky_solve_mat   n=  136 batch= 10400     49.742 ms      4.783 us/item   6.29% of peak
+chol     matmul               n=  136 batch= 10400      7.832 ms      0.753 us/item  34.26% of peak
+chol     cholesky             n=  560 batch=    16      1.233 ms     77.042 us/item   3.90% of peak
+chol     cholesky_solve_vec   n=  560 batch=    16      2.441 ms    152.579 us/item   1.99% of peak residual 4.5e-16
+chol     cholesky_solve_mat   n=  560 batch=    16      3.608 ms    225.486 us/item   9.32% of peak
+chol     matmul               n=  560 batch=    16      0.552 ms     34.474 us/item  52.25% of peak
+chol     cholesky             n=  560 batch=    64      2.439 ms     38.107 us/item   7.88% of peak
+chol     cholesky_solve_vec   n=  560 batch=    64      4.090 ms     63.905 us/item   4.75% of peak residual 4.8e-16
+chol     cholesky_solve_mat   n=  560 batch=    64      9.145 ms    142.884 us/item  14.71% of peak
+chol     matmul               n=  560 batch=    64      1.869 ms     29.207 us/item  61.67% of peak
+chol     cholesky             n=  960 batch=    16      3.552 ms    222.020 us/item   6.81% of peak
+chol     cholesky_solve_vec   n=  960 batch=    16      6.171 ms    385.672 us/item   3.95% of peak residual 4.9e-16
+chol     cholesky_solve_mat   n=  960 batch=    16      9.731 ms    608.182 us/item  17.41% of peak
+chol     matmul               n=  960 batch=    16      2.067 ms    129.213 us/item  70.23% of peak
+chol     cholesky             n=  960 batch=    64      7.481 ms    116.893 us/item  12.94% of peak
+chol     cholesky_solve_vec   n=  960 batch=    64     10.412 ms    162.685 us/item   9.35% of peak residual 4.9e-16
+chol     cholesky_solve_mat   n=  960 batch=    64     24.719 ms    386.228 us/item  27.41% of peak
+chol     matmul               n=  960 batch=    64      6.458 ms    100.909 us/item  89.92% of peak
+merge    eigh                 n=   32 batch=    16      0.391 ms     24.410 us/item   0.06% of peak
+merge    eigh                 n=   32 batch=    64      0.389 ms      6.084 us/item   0.25% of peak
+merge    eigh                 n=  128 batch=    16      1.670 ms    104.401 us/item   0.93% of peak
+merge    eigh                 n=  128 batch=    64      2.433 ms     38.019 us/item   2.55% of peak
+merge    qr_1120x32           n=   32 batch=    16      8.338 ms    521.126 us/item   0.05% of peak
+merge    gram_orth_1120x32    n=   32 batch=    16      0.439 ms     27.449 us/item   0.86% of peak
+merge    qr_1120x32           n=   32 batch=    64     12.328 ms    192.625 us/item   0.12% of peak
+merge    gram_orth_1120x32    n=   32 batch=    64      0.490 ms      7.652 us/item   3.07% of peak
+merge    qr_1120x128          n=  128 batch=    16     88.443 ms   5527.673 us/item   0.07% of peak
+merge    gram_orth_1120x128   n=  128 batch=    16      1.482 ms     92.604 us/item   4.06% of peak
+merge    qr_1120x128          n=  128 batch=    64    185.922 ms   2905.028 us/item   0.13% of peak
+merge    gram_orth_1120x128   n=  128 batch=    64      2.326 ms     36.344 us/item  10.36% of peak
+coupling K_scatter            n=   28 batch=  2600      0.081 ms      0.031 us/item
+coupling Kt_gather            n=   28 batch=  2600      0.082 ms      0.032 us/item
+coupling K_scatter            n=   28 batch= 26000      0.129 ms      0.005 us/item
+coupling Kt_gather            n=   28 batch= 26000      0.079 ms      0.003 us/item
+
+BATCHING VERDICTS (per-item time at the largest batch / at the smallest; <= 0.8, or >= 20% of the FP64 roofline, counts as batched)
+  chol     cholesky             n=   30 batches [2600, 10400]  ratio   0.73 roofline   0.59%       0.816 ms at largest  batched
+  chol     cholesky_solve_vec   n=   30 batches [2600, 10400]  ratio   0.71 roofline   0.44%       1.313 ms at largest  batched
+  chol     cholesky_solve_mat   n=   30 batches [2600, 10400]  ratio   0.81 roofline   1.37%       2.447 ms at largest  NOT BATCHED?
+  chol     matmul               n=   30 batches [2600, 10400]  ratio   0.38 roofline  15.64%       0.184 ms at largest  batched
+  chol     cholesky             n=  136 batches [2600, 10400]  ratio   0.96 roofline   3.38%      13.229 ms at largest  NOT BATCHED?
+  chol     cholesky_solve_vec   n=  136 batches [2600, 10400]  ratio   0.91 roofline   2.84%      16.450 ms at largest  NOT BATCHED?
+  chol     cholesky_solve_mat   n=  136 batches [2600, 10400]  ratio   0.86 roofline   6.29%      49.742 ms at largest  NOT BATCHED?
+  chol     matmul               n=  136 batches [2600, 10400]  ratio   0.88 roofline  34.26%       7.832 ms at largest  batched
+  chol     cholesky             n=  560 batches [16, 64]       ratio   0.49 roofline   7.88%       2.439 ms at largest  batched
+  chol     cholesky_solve_vec   n=  560 batches [16, 64]       ratio   0.42 roofline   4.75%       4.090 ms at largest  batched
+  chol     cholesky_solve_mat   n=  560 batches [16, 64]       ratio   0.63 roofline  14.71%       9.145 ms at largest  batched
+  chol     matmul               n=  560 batches [16, 64]       ratio   0.85 roofline  61.67%       1.869 ms at largest  batched
+  chol     cholesky             n=  960 batches [16, 64]       ratio   0.53 roofline  12.94%       7.481 ms at largest  batched
+  chol     cholesky_solve_vec   n=  960 batches [16, 64]       ratio   0.42 roofline   9.35%      10.412 ms at largest  batched
+  chol     cholesky_solve_mat   n=  960 batches [16, 64]       ratio   0.64 roofline  27.41%      24.719 ms at largest  batched
+  chol     matmul               n=  960 batches [16, 64]       ratio   0.78 roofline  89.92%       6.458 ms at largest  batched
+  merge    eigh                 n=   32 batches [16, 64]       ratio   0.25 roofline   0.25%       0.389 ms at largest  batched
+  merge    eigh                 n=  128 batches [16, 64]       ratio   0.36 roofline   2.55%       2.433 ms at largest  batched
+  merge    qr_1120x32           n=   32 batches [16, 64]       ratio   0.37 roofline   0.12%      12.328 ms at largest  batched
+  merge    gram_orth_1120x32    n=   32 batches [16, 64]       ratio   0.28 roofline   3.07%       0.490 ms at largest  batched
+  merge    qr_1120x128          n=  128 batches [16, 64]       ratio   0.53 roofline   0.13%     185.922 ms at largest  batched
+  merge    gram_orth_1120x128   n=  128 batches [16, 64]       ratio   0.39 roofline  10.36%       2.326 ms at largest  batched
+  coupling K_scatter            n=   28 batches [2600, 26000]  ratio   0.16 roofline    -          0.129 ms at largest  batched
+  coupling Kt_gather            n=   28 batches [2600, 26000]  ratio   0.10 roofline    -          0.079 ms at largest  batched
+saved /scratch/residual-controller/trellis-pdhg/runs/bench/linalg.json

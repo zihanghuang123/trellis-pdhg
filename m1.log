@@ -1,0 +1,108 @@
+tiny: {"task": "T1_push_straight", "N": 8, "modes": 10, "transitions_per_layer": 38, "vertices": 72, "edges": 244, "edges_by_kind": {"start": 6, "mid": 228, "goal": 10}, "edges_after_lp": 242, "edges_alive": 138, "types": 54, "types_lp_infeasible": 2, "types_used": 32, "types_lp_trouble": [], "lp_seconds": 0.31}
+full: {"task": "T1_push_straight", "N": 32, "modes": 20, "transitions_per_layer": 84, "vertices": 622, "edges": 2546, "edges_by_kind": {"start": 6, "mid": 2520, "goal": 20}, "edges_after_lp": 2544, "edges_alive": 2340, "types": 110, "types_lp_infeasible": 2, "types_used": 108, "types_lp_trouble": [], "lp_seconds": 0.45}
+built both instances in 0.8s
+[PASS] M0 geometry and limit surface (0.1s): tangents counter-clockwise; rbar 0.06737 m (changes 2.9e-07 at 2x grid), f_max 0.4905 N, tau_max 0.03304 N m
+[PASS] M0 friction sign (force on the slider along the pusher's slide) (0.0s): slide_pos drags the slider toward +t_j and slide_neg toward -t_j on every face; each fails the opposite type
+[PASS] M0 torque sign (0.0s): a +x push on face 2 above its center turns the slider clockwise, below it counter-clockwise
+[PASS] M0 true steps satisfy the constraint table (0.2s): worst violation over 700 random true steps 2.6e-16 (c0_slide_pos rot_rel)
+[PASS] M0 constraint table degrees and rows (0.0s): 110 edge types: every row and cost has degree <= 2 and carries the rows of its mode
+[PASS] M0 mode graph (plan 4.4) (0.0s): 20 modes, 84 transitions per layer, symmetric, matching plan 4.4 entry by entry
+[PASS] M0 trellis counts (0.0s): 2546 edges (6 start, 20 goal), 622 vertices; adjacent layers only, in order
+[PASS] M0 flow and coupling signs (0.0s): unit flow on a path conserves flow with beta_s = -1, beta_t = +1 (head +, tail -); breaking the path breaks it at both ends
+[PASS] M0 pruning soundness, tiny (0.1s): 2 edge types LP-infeasible (each misses feasibility by > 1e-07); 104 edges off every start->goal path; 138 of 244 edges kept
+[PASS] M0 pruning soundness, full (0.1s): 2 edge types LP-infeasible (each misses feasibility by > 1e-07); 204 edges off every start->goal path; 2340 of 2546 edges kept
+[PASS] M0 hand-scripted push, tiny (0.0s): N=8, 10 modes: valid start->goal path, worst residual 5.6e-17, J_hand = 0.066059 (strip_2 -> c2_stick x7 -> goal)
+[PASS] M0 hand-scripted push, full (0.0s): N=32, 20 modes: valid start->goal path, worst residual 1.1e-16, J_hand = 0.053800 (strip_2 -> c2_stick x31 -> goal)
+
+ALL M0 CHECKS PASSED; details in /scratch/residual-controller/trellis-pdhg/runs/selftest/m0.json
+built 4 tasks without and with 8 theta regions in 19.0s; with regions: {"task": "T1_push_straight", "N": 32, "modes": 160, "transitions_per_layer": 1440, "vertices": 4962, "edges": 43246, "edges_by_kind": {"start": 6, "mid": 43200, "goal": 40}, "edges_after_lp": 43244, "edges_alive": 34028, "types": 1486, "types_lp_infeasible": 2, "types_used": 1484, "types_lp_trouble": [], "lp_seconds": 4.22}
+[PASS] M1 moment basis: sizes, order, index tables, interval box (0.1s): kappa 1: 136 moments, 16 x 16, tables good to 0e+00; kappa 2: 3876 moments, 136 x 136, tables good to 2e-16; kappa 3: 54264 moments, 816 x 816, tables good to 3e-16; interval box holds on random points and is exact on hand cases
+[PASS] M1 sampler against the scalar true step (0.0s): 833 samples over 12 contact modes match the scalar true step to 4.4e-16
+[PASS] M1 region copies hold every true step (0.0s): 1440 transitions per layer at 8 theta regions; 8000 random true steps all have an allowed pair of copies
+[PASS] M1 lifted rows match their polynomials, kappa 1 (0.1s): 108 edge types: lifted rows, blocks and costs match at random points to 7.1e-15; the rows kept span the raw rows
+[PASS] M1 lifted rows match their polynomials, kappa 2 (0.2s): 108 edge types: lifted rows, blocks and costs match at random points to 7.1e-15
+[PASS] M1 lifted rows match their polynomials, kappa 3 (3 edge types) (0.4s): 3 edge types: lifted rows, blocks and costs match at random points to 7.1e-15
+[PASS] M1 validity 5.4, SDP kappa 1 (2.3s): 180 edge types, 1800000 true samples (fewest on a sampled type: 10000); worst box 1.7e-18, cost 7.5e-16, coupling 0.0e+00, eq 3.9e-16, ge 2.2e-16, psd_bound 0.0e+00, psd_eig 3.0e-15, table 3.9e-16
+[PASS] M1 validity 5.4, SDP kappa 2 (66.7s): 180 edge types, 1800000 true samples (fewest on a sampled type: 10000); worst box 2.8e-17, cost 7.5e-16, coupling 0.0e+00, eq 3.9e-16, ge 2.2e-16, psd_bound 9.2e-14, psd_eig 1.1e-14, table 3.9e-16
+[PASS] M1 validity 5.4, SDP kappa 3 (34.3s): 180 edge types, 36000 true samples (fewest on a sampled type: 200); worst box 2.8e-17, cost 6.1e-16, coupling 0.0e+00, eq 3.5e-16, ge 2.2e-16, psd_bound 7.2e-13, psd_eig 2.7e-14, table 3.5e-16
+[PASS] M1 validity 5.4, SDP kappa 1 with theta regions (A-reg) (15.9s): 1616 edge types, 16160000 true samples (fewest on a sampled type: 10000); worst box 2.4e-16, cost 9.7e-16, coupling 0.0e+00, eq 4.4e-16, ge 2.8e-16, psd_bound 0.0e+00, psd_eig 3.4e-15, table 4.4e-16
+[PASS] M1 validity 5.4, Taylor bands (B) (2.9s): 1616 edge types, 16160000 true samples (fewest on a sampled type: 10000); worst box 6.7e-16, cost 4.3e-16, coupling 2.4e-16, eq 9.7e-17, ge 5.6e-16, table 4.4e-16
+[PASS] M1 validity 5.4, Taylor McCormick (2.4s): 1528 edge types, 15280000 true samples (fewest on a sampled type: 10000); worst box 6.7e-16, cost 4.3e-16, coupling 2.4e-16, eq 9.7e-17, ge 5.6e-16, table 4.4e-16
+[PASS] M1 validity 5.4, Taylor SOC costs (2.4s): 1528 edge types, 15280000 true samples (fewest on a sampled type: 10000); worst box 6.7e-16, cost 4.3e-16, coupling 2.4e-16, eq 9.7e-17, ge 5.0e-16, soc 4.7e-16, table 4.4e-16
+[PASS] M1 negative controls, SDP kappa 1 (0.0s): flagged: torque 4.6e-02, translation 2.0e-01, contact line 1.0e-03, friction 5.0e-01, static slider 1.0e-03, zero force 1.0e-03, unit norm 2.0e-02
+[PASS] M1 negative controls, SDP kappa 2 (0.1s): flagged: torque 4.6e-02, translation 2.0e-01, contact line 1.0e-03, friction 5.0e-01, static slider 1.0e-03, zero force 1.0e-03, unit norm 2.1e-02, localizing block 4.6e+00
+[PASS] M1 negative controls, Taylor (0.0s): flagged: torque 4.6e-02, translation 1.7e-01, contact line 1.0e-03, friction 5.0e-01, static slider 1.0e-03, zero force 1.0e-03
+[PASS] M1 coupling and cost along the hand push, SDP kappa 1 (0.1s): 32 steps, q = 28: coupling mismatch 0.0e+00, row violation 1.1e-16, linear cost 0.053800 vs J_hand 0.053800
+[PASS] M1 coupling and cost along the hand push, SDP kappa 2 (0.2s): 32 steps, q = 28: coupling mismatch 0.0e+00, row violation 1.1e-16, linear cost 0.053800 vs J_hand 0.053800
+[PASS] M1 coupling and cost along the hand push, Taylor (0.1s): 32 steps, q = 6: coupling mismatch 0.0e+00, row violation 1.1e-16, linear cost 0.053800 vs J_hand 0.053800
+
+Taylor bands at theta_splits 8, lambda_splits 1 (width over the alive edge types)
+  rot_rel    min 2.980e-03  max 2.980e-03  (1484 edge types)
+  torque     min 1.875e-02  max 2.500e-02  (1176 edge types)
+  trans_x    min 2.925e-02  max 3.868e-02  (1176 edge types)
+  trans_y    min 2.925e-02  max 3.868e-02  (1176 edge types)
+region sizing, worst case over faces and regions on the full force box
+  theta_splits    4: translation band 1.058e-01 m
+  theta_splits    8: translation band 3.868e-02 m   (x0.37 of the previous row)
+  theta_splits   16: translation band 1.715e-02 m   (x0.44 of the previous row)
+  theta_splits   32: translation band 7.930e-03 m   (x0.46 of the previous row)
+  theta_splits   64: translation band 3.790e-03 m   (x0.48 of the previous row)
+  theta_splits  128: translation band 1.850e-03 m   (x0.49 of the previous row)
+  theta_splits  256: translation band 9.134e-04 m   (x0.49 of the previous row)
+  lambda_splits   1: torque band 2.500e-02 N m
+  lambda_splits   2: torque band 1.250e-02 N m
+  lambda_splits   4: torque band 6.250e-03 N m
+  lambda_splits   8: torque band 3.125e-03 N m
+  lambda_splits  16: torque band 1.563e-03 N m
+  rotation band 2.980e-03 rad at any split count
+  smallest splits for trans <= 0.001 m and torque <= 0.0001 N m: (235, 250)
+[PASS] M1 Taylor bands and region sizing (1.0s): bands within the formula (translation 3.868e-02 m, torque 2.500e-02 N m, rotation 2.980e-03 rad); doubling fine regions scales translation by 0.497; sizing target needs 235 theta and 250 lambda splits
+[PASS] M1 Taylor feasibility pruning (1.0s): 0 of 1484 LP-alive edge types pruned, none holding a true sample; 34028 of 43246 edges kept
+
+SDP kappa 1: 108 alive edge types, 136 entries of m
+  goal, contact tail       types    12  open       135-135  eq raw       118-134  eq         96-96  ge     12-13  eq+ge       108-109  nnz         199-199  psd ['1 x 16']
+  goal, free tail          types     8  open         90-90  eq raw       179-179  eq       121-121  ge       8-8  eq+ge       129-129  nnz         196-197  psd ['1 x 16']
+  mid, contact -> contact  types    36  open       135-135  eq raw         54-70  eq         51-51  ge     12-13  eq+ge         63-64  nnz         139-141  psd ['1 x 16']
+  mid, contact -> free     types    12  open       135-135  eq raw         54-70  eq         51-51  ge     15-16  eq+ge         66-67  nnz         145-147  psd ['1 x 16']
+  mid, free -> contact     types    12  open         90-90  eq raw       131-131  eq       101-101  ge     10-10  eq+ge       111-111  nnz         185-185  psd ['1 x 16']
+  mid, free -> free        types    24  open         90-90  eq raw       115-115  eq         92-92  ge     11-11  eq+ge       103-103  nnz         169-171  psd ['1 x 16']
+  start                    types     4  open         90-90  eq raw       211-227  eq       130-133  ge     10-11  eq+ge       141-143  nnz         201-205  psd ['1 x 16']
+
+SDP kappa 2: 108 alive edge types, 3876 entries of m
+  goal, contact tail       types    12  open     3875-3875  eq raw     6528-7344  eq     6392-7208  ge     13-14  eq+ge     6405-7222  nnz     12556-14190  psd ['1 x 136 + 13 x 16', '1 x 136 + 14 x 16']
+  goal, free tail          types     8  open     1819-1819  eq raw     9384-9384  eq     8179-8179  ge       9-9  eq+ge     8188-8188  nnz     13928-13929  psd ['1 x 136 + 9 x 16']
+  mid, contact -> contact  types    36  open     3875-3875  eq raw     3264-4080  eq     3264-4080  ge     13-14  eq+ge     3277-4094  nnz       7796-9430  psd ['1 x 136 + 13 x 16', '1 x 136 + 14 x 16']
+  mid, contact -> free     types    12  open     3875-3875  eq raw     3264-4080  eq     3264-4080  ge     16-17  eq+ge     3280-4097  nnz       7802-9436  psd ['1 x 136 + 16 x 16', '1 x 136 + 17 x 16']
+  mid, free -> contact     types    12  open     1819-1819  eq raw     6936-6936  eq     6544-6544  ge     11-11  eq+ge     6555-6555  nnz     11481-11481  psd ['1 x 136 + 11 x 16']
+  mid, free -> free        types    24  open     1819-1819  eq raw     6120-6120  eq     5728-5728  ge     12-12  eq+ge     5740-5740  nnz       9851-9853  psd ['1 x 136 + 12 x 16']
+  start                    types     4  open     1819-1819  eq raw   11016-11832  eq     8685-9501  ge     11-12  eq+ge     8697-9512  nnz     14440-16070  psd ['1 x 136 + 11 x 16', '1 x 136 + 12 x 16']
+
+SDP kappa 3: 108 alive edge types, 54264 entries of m
+  goal, contact tail       types    12  open   54263-54263  eq raw 131784-147288  eq 127908-143412  ge     13-14  eq+ge 127921-143426  nnz   263612-294622  psd ['1 x 816 + 13 x 136', '1 x 816 + 14 x 136']
+  goal, free tail          types     8  open   18563-18563  eq raw 182172-182172  eq 150908-150908  ge       9-9  eq+ge 150917-150917  nnz   267225-267226  psd ['1 x 816 + 9 x 136']
+  mid, contact -> contact  types    36  open   54263-54263  eq raw   69768-85272  eq   69768-85272  ge     13-14  eq+ge   69781-85286  nnz   174464-205474  psd ['1 x 816 + 13 x 136', '1 x 816 + 14 x 136']
+  mid, contact -> free     types    12  open   54263-54263  eq raw   69768-85272  eq   69768-85272  ge     16-17  eq+ge   69784-85289  nnz   174470-205480  psd ['1 x 816 + 16 x 136', '1 x 816 + 17 x 136']
+  mid, free -> contact     types    12  open   18563-18563  eq raw 135660-135660  eq 124848-124848  ge     11-11  eq+ge 124859-124859  nnz   225665-225665  psd ['1 x 816 + 11 x 136']
+  mid, free -> free        types    24  open   18563-18563  eq raw 120156-120156  eq 109344-109344  ge     12-12  eq+ge 109356-109356  nnz   194659-194661  psd ['1 x 816 + 12 x 136']
+  start                    types     4  open   18563-18563  eq raw 213180-228684  eq 155913-171417  ge     11-12  eq+ge 155925-171428  nnz   272236-303242  psd ['1 x 816 + 11 x 136', '1 x 816 + 12 x 136']
+
+SDP kappa 1 with theta regions (A-reg): 1484 alive edge types, 136 entries of m
+  goal, contact tail       types    24  open       135-135  eq raw       118-134  eq         96-96  ge     15-16  eq+ge       111-112  nnz         205-205  psd ['1 x 16']
+  goal, free tail          types    16  open         90-90  eq raw       179-179  eq       121-121  ge     11-11  eq+ge       132-132  nnz         202-203  psd ['1 x 16']
+  mid, contact -> contact  types   864  open       135-135  eq raw         54-70  eq         51-51  ge     18-19  eq+ge         69-70  nnz         151-153  psd ['1 x 16']
+  mid, contact -> free     types   288  open       135-135  eq raw         54-70  eq         51-51  ge     21-22  eq+ge         72-73  nnz         157-159  psd ['1 x 16']
+  mid, free -> contact     types    96  open         90-90  eq raw       131-131  eq       101-101  ge     16-16  eq+ge       117-117  nnz         197-197  psd ['1 x 16']
+  mid, free -> free        types   192  open         90-90  eq raw       115-115  eq         92-92  ge     17-17  eq+ge       109-109  nnz         181-183  psd ['1 x 16']
+  start                    types     4  open         90-90  eq raw       211-227  eq       130-133  ge     16-17  eq+ge       147-149  nnz         213-217  psd ['1 x 16']
+
+Taylor (B): 1484 alive edge types, 21 entries of m
+  goal, contact tail       types    24  open         20-20  eq raw           6-7  eq           6-6  ge   133-134  eq+ge       139-140  nnz         495-497  psd ['none']
+  goal, free tail          types    16  open         12-12  eq raw           9-9  eq           9-9  ge     43-43  eq+ge         52-52  nnz         173-174  psd ['none']
+  mid, contact -> contact  types   864  open         20-20  eq raw           3-4  eq           3-3  ge   133-134  eq+ge       136-137  nnz         491-493  psd ['none']
+  mid, contact -> free     types   288  open         20-20  eq raw           3-4  eq           3-3  ge   136-137  eq+ge       139-140  nnz         497-499  psd ['none']
+  mid, free -> contact     types    96  open         12-12  eq raw           7-7  eq           7-7  ge     45-45  eq+ge         52-52  nnz         175-175  psd ['none']
+  mid, free -> free        types   192  open         12-12  eq raw           6-6  eq           6-6  ge     46-46  eq+ge         52-52  nnz         175-177  psd ['none']
+  start                    types     4  open         12-12  eq raw         11-12  eq         11-12  ge     45-46  eq+ge         57-57  nnz         181-181  psd ['none']
+[PASS] M1 sizes per group of edge types (plan 5.1.7) (1.7s): printed above
+
+ALL M1 CHECKS PASSED in 151s; details in /scratch/residual-controller/trellis-pdhg/runs/selftest/m1.json

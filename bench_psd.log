@@ -1,0 +1,36 @@
+psd      eigh                 n=   16 batch=   650      0.287 ms      0.442 us/item   0.43% of peak err_max 0.0e+00 order=1 positives=4-4
+psd      lowrank_p8           n=   16 batch=   650      0.562 ms      0.865 us/item   0.34% of peak err_max 5.7e-15 res_max 2.9e-15 order=1 positives=4-4
+psd      eigh                 n=   16 batch=  2600      0.617 ms      0.237 us/item   0.80% of peak err_max 0.0e+00 order=1 positives=4-4
+psd      lowrank_p8           n=   16 batch=  2600      1.122 ms      0.432 us/item   0.68% of peak err_max 8.9e-06 res_max 1.0e-05 order=1 positives=4-4
+psd      eigh                 n=  136 batch=   650     37.170 ms     57.184 us/item   2.03% of peak err_max 0.0e+00 order=2 positives=4-4
+psd      lowrank_p8           n=  136 batch=   650      0.948 ms      1.459 us/item   5.38% of peak err_max 3.0e-05 res_max 2.4e-05 order=2 positives=4-4
+psd      lowrank_p16          n=  136 batch=   650      1.815 ms      2.792 us/item   6.91% of peak err_max 2.5e-05 res_max 2.1e-05 order=2 positives=4-4
+psd      eigh                 n=  136 batch=  2600    128.089 ms     49.265 us/item   2.36% of peak err_max 0.0e+00 order=2 positives=4-4
+psd      lowrank_p8           n=  136 batch=  2600      2.824 ms      1.086 us/item   7.23% of peak err_max 3.1e-05 res_max 2.5e-05 order=2 positives=4-4
+psd      lowrank_p16          n=  136 batch=  2600      5.794 ms      2.228 us/item   8.65% of peak err_max 2.6e-05 res_max 2.2e-05 order=2 positives=4-4
+psd      eigh                 n=  816 batch=   256    562.559 ms   2197.497 us/item  11.41% of peak err_max 0.0e+00 order=3 positives=4-4
+psd      lowrank_p8           n=  816 batch=   256      4.256 ms     16.625 us/item  13.79% of peak err_max 1.2e-05 res_max 9.1e-06 order=3 positives=4-4
+psd      lowrank_p16          n=  816 batch=   256      5.534 ms     21.616 us/item  22.20% of peak err_max 1.2e-05 res_max 8.9e-06 order=3 positives=4-4
+psd      lowrank_p8           n=  816 batch=  1024     15.292 ms     14.933 us/item  15.35% of peak err_max 1.2e-05 res_max 9.0e-06 order=3 positives=4-4
+psd      lowrank_p16          n=  816 batch=  1024     18.838 ms     18.396 us/item  26.09% of peak err_max 1.2e-05 res_max 8.8e-06 order=3 positives=4-4
+
+BATCHING VERDICTS (per-item time at the largest batch / at the smallest; <= 0.8, or >= 20% of the FP64 roofline, counts as batched)
+  psd      eigh                 n=   16 batches [650, 2600]    ratio   0.54 roofline   0.80%       0.617 ms at largest  batched
+  psd      lowrank_p8           n=   16 batches [650, 2600]    ratio   0.50 roofline   0.68%       1.122 ms at largest  batched
+  psd      eigh                 n=  136 batches [650, 2600]    ratio   0.86 roofline   2.36%     128.089 ms at largest  NOT BATCHED?
+  psd      lowrank_p8           n=  136 batches [650, 2600]    ratio   0.74 roofline   7.23%       2.824 ms at largest  batched
+  psd      lowrank_p16          n=  136 batches [650, 2600]    ratio   0.80 roofline   8.65%       5.794 ms at largest  batched
+  psd      eigh                 n=  816 batches [256]          ratio    -   roofline  11.41%     562.559 ms at largest  one batch size only
+  psd      lowrank_p8           n=  816 batches [256, 1024]    ratio   0.90 roofline  15.35%      15.292 ms at largest  NOT BATCHED?
+  psd      lowrank_p16          n=  816 batches [256, 1024]    ratio   0.85 roofline  26.09%      18.838 ms at largest  batched
+
+PROJECTION TIME PER ROUND at 2600 edges (one matrix per edge; from the per-item time at the largest batch run)
+  order 1 (16x16): eigh              0.617 ms   err_max 0.0e+00
+  order 1 (16x16): lowrank_p8        1.122 ms   err_max 8.9e-06
+  order 2 (136x136): eigh            128.089 ms   err_max 0.0e+00
+  order 2 (136x136): lowrank_p8        2.824 ms   err_max 3.1e-05
+  order 2 (136x136): lowrank_p16       5.794 ms   err_max 2.6e-05
+  order 3 (816x816): eigh           5713.492 ms   err_max 0.0e+00
+  order 3 (816x816): lowrank_p8       38.827 ms   err_max 1.2e-05
+  order 3 (816x816): lowrank_p16      47.830 ms   err_max 1.2e-05
+saved /scratch/residual-controller/trellis-pdhg/runs/bench/psd.json

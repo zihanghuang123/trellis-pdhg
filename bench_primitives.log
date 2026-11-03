@@ -1,0 +1,215 @@
+psd      eigh                   n=  136 batch=   650     39.708 ms     61.089 us/item   1.90% of peak err_median 0.0e+00 err_max 0.0e+00 rank=1
+psd      eigvalsh               n=  136 batch=   650     33.614 ms     51.714 us/item   1.00% of peak rank=1
+psd      newton_schulz_10       n=  136 batch=   650     12.265 ms     18.869 us/item  28.71% of peak err_median 9.0e-03 err_max 1.2e-02 rank=1
+psd      newton_schulz_20       n=  136 batch=   650     23.592 ms     36.296 us/item  29.14% of peak err_median 2.5e-04 err_max 2.9e-04 rank=1
+psd      newton_schulz_40       n=  136 batch=   650     46.253 ms     71.159 us/item  29.37% of peak err_median 8.2e-16 err_max 1.2e-08 rank=1
+psd      qdwh_polar             n=  136 batch=   650    274.507 ms    422.318 us/item err_median 1.0e-15 err_max 1.9e-15 rank=1
+psd      jacobi_cold_6          n=  136 batch=   650    520.544 ms    800.837 us/item   0.87% of peak err_median 1.3e-04 err_max 1.9e-03 rank=1
+psd      jacobi_warm_1          n=  136 batch=   650     87.454 ms    134.545 us/item   1.25% of peak err_median 2.8e-04 err_max 7.2e-04 rank=1
+psd      jacobi_warm_2          n=  136 batch=   650    174.107 ms    267.856 us/item   1.06% of peak err_median 1.2e-04 err_max 3.6e-04 rank=1
+psd      lowrank_p8_s1          n=  136 batch=   650     24.434 ms     37.590 us/item   0.20% of peak err_median 5.5e-04 err_max 1.4e-03 rank=1
+psd      lowrank_p8_s2          n=  136 batch=   650     48.396 ms     74.456 us/item   0.16% of peak err_median 5.4e-04 err_max 1.4e-03 rank=1
+psd      eigh                   n=  136 batch=  2600    116.777 ms     44.914 us/item   2.58% of peak err_median 0.0e+00 err_max 0.0e+00 rank=1
+psd      eigvalsh               n=  136 batch=  2600    116.153 ms     44.674 us/item   1.16% of peak rank=1
+psd      newton_schulz_10       n=  136 batch=  2600     47.785 ms     18.379 us/item  29.48% of peak err_median 9.0e-03 err_max 1.2e-02 rank=1
+psd      newton_schulz_20       n=  136 batch=  2600     92.072 ms     35.412 us/item  29.87% of peak err_median 2.5e-04 err_max 3.0e-04 rank=1
+psd      newton_schulz_40       n=  136 batch=  2600    180.843 ms     69.555 us/item  30.04% of peak err_median 8.4e-16 err_max 1.2e-08 rank=1
+psd      qdwh_polar             n=  136 batch=  2600    901.821 ms    346.854 us/item err_median 1.0e-15 err_max 2.1e-15 rank=1
+psd      jacobi_cold_6          n=  136 batch=  2600   2005.427 ms    771.318 us/item   0.90% of peak err_median 1.2e-04 err_max 3.0e-03 rank=1
+psd      jacobi_warm_1          n=  136 batch=  2600    341.600 ms    131.385 us/item   1.28% of peak err_median 2.7e-04 err_max 6.3e-04 rank=1
+psd      jacobi_warm_2          n=  136 batch=  2600    670.753 ms    257.982 us/item   1.10% of peak err_median 1.2e-04 err_max 2.9e-04 rank=1
+psd      lowrank_p8_s1          n=  136 batch=  2600     96.221 ms     37.008 us/item   0.21% of peak err_median 5.4e-04 err_max 1.2e-03 rank=1
+psd      lowrank_p8_s2          n=  136 batch=  2600    191.838 ms     73.784 us/item   0.16% of peak err_median 5.4e-04 err_max 1.2e-03 rank=1
+psd      eigh                   n=  136 batch=   650     34.205 ms     52.624 us/item   2.21% of peak err_median 0.0e+00 err_max 0.0e+00 rank=4
+psd      eigvalsh               n=  136 batch=   650     33.540 ms     51.600 us/item   1.00% of peak rank=4
+psd      newton_schulz_10       n=  136 batch=   650     12.273 ms     18.881 us/item  28.69% of peak err_median 8.9e-03 err_max 1.1e-02 rank=4
+psd      newton_schulz_20       n=  136 batch=   650     23.643 ms     36.375 us/item  29.08% of peak err_median 2.5e-04 err_max 2.9e-04 rank=4
+psd      newton_schulz_40       n=  136 batch=   650     46.259 ms     71.167 us/item  29.36% of peak err_median 1.2e-15 err_max 1.2e-08 rank=4
+psd      qdwh_polar             n=  136 batch=   650    274.636 ms    422.517 us/item err_median 1.3e-15 err_max 2.1e-15 rank=4
+psd      jacobi_cold_6          n=  136 batch=   650    520.633 ms    800.974 us/item   0.87% of peak err_median 1.1e-04 err_max 1.7e-03 rank=4
+psd      jacobi_warm_1          n=  136 batch=   650     87.448 ms    134.536 us/item   1.25% of peak err_median 2.4e-04 err_max 4.6e-04 rank=4
+psd      jacobi_warm_2          n=  136 batch=   650    174.083 ms    267.820 us/item   1.06% of peak err_median 1.0e-04 err_max 2.1e-04 rank=4
+psd      lowrank_p8_s1          n=  136 batch=   650     24.308 ms     37.398 us/item   0.20% of peak err_median 4.8e-04 err_max 9.1e-04 rank=4
+psd      lowrank_p8_s2          n=  136 batch=   650     48.420 ms     74.493 us/item   0.16% of peak err_median 4.8e-04 err_max 9.1e-04 rank=4
+psd      eigh                   n=  136 batch=  2600    116.485 ms     44.802 us/item   2.59% of peak err_median 0.0e+00 err_max 0.0e+00 rank=4
+psd      eigvalsh               n=  136 batch=  2600    113.821 ms     43.777 us/item   1.18% of peak rank=4
+psd      newton_schulz_10       n=  136 batch=  2600     47.660 ms     18.331 us/item  29.56% of peak err_median 8.9e-03 err_max 1.1e-02 rank=4
+psd      newton_schulz_20       n=  136 batch=  2600     92.042 ms     35.401 us/item  29.88% of peak err_median 2.5e-04 err_max 3.0e-04 rank=4
+psd      newton_schulz_40       n=  136 batch=  2600    180.832 ms     69.551 us/item  30.05% of peak err_median 1.1e-15 err_max 1.2e-08 rank=4
+psd      qdwh_polar             n=  136 batch=  2600    901.706 ms    346.810 us/item err_median 1.2e-15 err_max 2.2e-15 rank=4
+psd      jacobi_cold_6          n=  136 batch=  2600   2006.178 ms    771.607 us/item   0.90% of peak err_median 1.1e-04 err_max 2.4e-03 rank=4
+psd      jacobi_warm_1          n=  136 batch=  2600    341.641 ms    131.400 us/item   1.28% of peak err_median 2.4e-04 err_max 4.6e-04 rank=4
+psd      jacobi_warm_2          n=  136 batch=  2600    670.917 ms    258.045 us/item   1.10% of peak err_median 1.0e-04 err_max 2.6e-04 rank=4
+psd      lowrank_p8_s1          n=  136 batch=  2600     96.214 ms     37.005 us/item   0.21% of peak err_median 4.8e-04 err_max 8.4e-04 rank=4
+psd      lowrank_p8_s2          n=  136 batch=  2600    191.804 ms     73.771 us/item   0.16% of peak err_median 4.8e-04 err_max 8.4e-04 rank=4
+psd      eigh                   n=  816 batch=    64    168.188 ms   2627.931 us/item   9.54% of peak err_median 0.0e+00 err_max 0.0e+00 rank=1
+psd      eigvalsh               n=  816 batch=    64    163.542 ms   2555.347 us/item   4.36% of peak rank=1
+psd      newton_schulz_10       n=  816 batch=    64     98.600 ms   1540.629 us/item  75.96% of peak err_median 2.2e-02 err_max 2.5e-02 rank=1
+psd      newton_schulz_20       n=  816 batch=    64    192.215 ms   3003.361 us/item  76.08% of peak err_median 5.1e-04 err_max 5.6e-04 rank=1
+psd      newton_schulz_40       n=  816 batch=    64    378.896 ms   5920.243 us/item  76.25% of peak err_median 4.5e-09 err_max 1.3e-08 rank=1
+psd      qdwh_polar             n=  816 batch=    64  19582.397 ms 305974.947 us/item err_median 1.3e-15 err_max 1.4e-15 rank=1
+psd      jacobi_warm_1          n=  816 batch=    64   1714.323 ms  26786.301 us/item   1.35% of peak err_median 2.9e-04 err_max 3.7e-04 rank=1
+psd      jacobi_warm_2          n=  816 batch=    64   3367.975 ms  52624.604 us/item   1.16% of peak err_median 1.3e-04 err_max 1.8e-04 rank=1
+psd      lowrank_p8_s1          n=  816 batch=    64      4.564 ms     71.305 us/item   3.83% of peak err_median 5.7e-04 err_max 7.2e-04 rank=1
+psd      lowrank_p8_s2          n=  816 batch=    64      8.803 ms    137.554 us/item   3.18% of peak err_median 5.7e-04 err_max 7.2e-04 rank=1
+psd      eigh                   n=  816 batch=   256    538.671 ms   2104.183 us/item  11.92% of peak err_median 0.0e+00 err_max 0.0e+00 rank=1
+psd      eigvalsh               n=  816 batch=   256    519.616 ms   2029.750 us/item   5.49% of peak rank=1
+psd      newton_schulz_10       n=  816 batch=   256    394.254 ms   1540.055 us/item  75.99% of peak err_median 2.2e-02 err_max 2.5e-02 rank=1
+psd      newton_schulz_20       n=  816 batch=   256    767.423 ms   2997.748 us/item  76.22% of peak err_median 5.1e-04 err_max 5.7e-04 rank=1
+psd      newton_schulz_40       n=  816 batch=   256   1514.454 ms   5915.836 us/item  76.30% of peak err_median 6.8e-09 err_max 1.6e-08 rank=1
+psd      qdwh_polar             n=  816 batch=   256  22426.601 ms  87603.909 us/item err_median 1.3e-15 err_max 1.5e-15 rank=1
+psd      lowrank_p8_s1          n=  816 batch=   256     14.781 ms     57.737 us/item   4.73% of peak err_median 5.6e-04 err_max 7.4e-04 rank=1
+psd      lowrank_p8_s2          n=  816 batch=   256     28.569 ms    111.599 us/item   3.92% of peak err_median 5.6e-04 err_max 7.4e-04 rank=1
+psd      eigh                   n=  816 batch=    64    168.433 ms   2631.770 us/item   9.53% of peak err_median 0.0e+00 err_max 0.0e+00 rank=4
+psd      eigvalsh               n=  816 batch=    64    163.480 ms   2554.373 us/item   4.36% of peak rank=4
+psd      newton_schulz_10       n=  816 batch=    64     97.818 ms   1528.413 us/item  76.57% of peak err_median 2.2e-02 err_max 2.4e-02 rank=4
+psd      newton_schulz_20       n=  816 batch=    64    190.192 ms   2971.756 us/item  76.88% of peak err_median 5.0e-04 err_max 5.3e-04 rank=4
+psd      newton_schulz_40       n=  816 batch=    64    375.442 ms   5866.275 us/item  76.95% of peak err_median 4.8e-09 err_max 1.4e-08 rank=4
+psd      qdwh_polar             n=  816 batch=    64  19581.493 ms 305960.836 us/item err_median 1.4e-15 err_max 1.5e-15 rank=4
+psd      jacobi_warm_1          n=  816 batch=    64   1714.917 ms  26795.583 us/item   1.35% of peak err_median 2.8e-04 err_max 3.2e-04 rank=4
+psd      jacobi_warm_2          n=  816 batch=    64   3368.439 ms  52631.863 us/item   1.16% of peak err_median 1.3e-04 err_max 1.5e-04 rank=4
+psd      lowrank_p8_s1          n=  816 batch=    64      4.543 ms     70.992 us/item   3.85% of peak err_median 5.5e-04 err_max 6.3e-04 rank=4
+psd      lowrank_p8_s2          n=  816 batch=    64      8.766 ms    136.968 us/item   3.19% of peak err_median 5.5e-04 err_max 6.3e-04 rank=4
+psd      eigh                   n=  816 batch=   256    539.858 ms   2108.819 us/item  11.89% of peak err_median 0.0e+00 err_max 0.0e+00 rank=4
+psd      eigvalsh               n=  816 batch=   256    519.429 ms   2029.018 us/item   5.49% of peak rank=4
+psd      newton_schulz_10       n=  816 batch=   256    393.706 ms   1537.914 us/item  76.09% of peak err_median 2.2e-02 err_max 2.5e-02 rank=4
+psd      newton_schulz_20       n=  816 batch=   256    766.534 ms   2994.275 us/item  76.31% of peak err_median 5.0e-04 err_max 5.5e-04 rank=4
+psd      newton_schulz_40       n=  816 batch=   256   1511.857 ms   5905.692 us/item  76.43% of peak err_median 6.7e-09 err_max 1.7e-08 rank=4
+psd      qdwh_polar             n=  816 batch=   256  22424.385 ms  87595.253 us/item err_median 1.4e-15 err_max 1.6e-15 rank=4
+psd      lowrank_p8_s1          n=  816 batch=   256     14.787 ms     57.761 us/item   4.73% of peak err_median 5.5e-04 err_max 7.4e-04 rank=4
+psd      lowrank_p8_s2          n=  816 batch=   256     28.560 ms    111.564 us/item   3.92% of peak err_median 5.5e-04 err_max 7.4e-04 rank=4
+chol     cholesky               n=   16 batch=  2600      0.157 ms      0.060 us/item   0.12% of peak
+chol     cholesky_solve_vec     n=   16 batch=  2600      0.200 ms      0.077 us/item   0.13% of peak residual 1.0e-15
+chol     cholesky_solve_mat     n=   16 batch=  2600      0.321 ms      0.123 us/item   0.40% of peak
+chol     matmul                 n=   16 batch=  2600      0.082 ms      0.031 us/item   1.34% of peak
+chol     cholesky               n=   16 batch= 10400      0.286 ms      0.028 us/item   0.25% of peak
+chol     cholesky_solve_vec     n=   16 batch= 10400      0.401 ms      0.039 us/item   0.25% of peak residual 8.9e-16
+chol     cholesky_solve_mat     n=   16 batch= 10400      0.831 ms      0.080 us/item   0.61% of peak
+chol     matmul                 n=   16 batch= 10400      0.120 ms      0.012 us/item   3.63% of peak
+chol     cholesky               n=   30 batch=  2600      0.285 ms      0.110 us/item   0.42% of peak
+chol     cholesky_solve_vec     n=   30 batch=  2600      0.461 ms      0.177 us/item   0.31% of peak residual 5.9e-16
+chol     cholesky_solve_mat     n=   30 batch=  2600      0.759 ms      0.292 us/item   1.11% of peak
+chol     matmul                 n=   30 batch=  2600      0.122 ms      0.047 us/item   5.89% of peak
+chol     cholesky               n=   30 batch= 10400      0.812 ms      0.078 us/item   0.59% of peak
+chol     cholesky_solve_vec     n=   30 batch= 10400      1.321 ms      0.127 us/item   0.44% of peak residual 7.3e-16
+chol     cholesky_solve_mat     n=   30 batch= 10400      2.454 ms      0.236 us/item   1.37% of peak
+chol     matmul                 n=   30 batch= 10400      0.185 ms      0.018 us/item  15.60% of peak
+chol     cholesky               n=  136 batch=  2600      3.464 ms      1.332 us/item   3.23% of peak
+chol     cholesky_solve_vec     n=  136 batch=  2600      4.537 ms      1.745 us/item   2.57% of peak residual 5.4e-16
+chol     cholesky_solve_mat     n=  136 batch=  2600     14.438 ms      5.553 us/item   5.42% of peak
+chol     matmul                 n=  136 batch=  2600      2.064 ms      0.794 us/item  32.49% of peak
+chol     cholesky               n=  136 batch= 10400     12.028 ms      1.157 us/item   3.72% of peak
+chol     cholesky_solve_vec     n=  136 batch= 10400     14.743 ms      1.418 us/item   3.17% of peak residual 5.7e-16
+chol     cholesky_solve_mat     n=  136 batch= 10400     49.784 ms      4.787 us/item   6.29% of peak
+chol     matmul                 n=  136 batch= 10400      7.824 ms      0.752 us/item  34.30% of peak
+chol     cholesky               n=  560 batch=    16      1.481 ms     92.539 us/item   3.24% of peak
+chol     cholesky_solve_vec     n=  560 batch=    16      2.962 ms    185.116 us/item   1.64% of peak residual 4.5e-16
+chol     cholesky_solve_mat     n=  560 batch=    16      3.635 ms    227.210 us/item   9.25% of peak
+chol     matmul                 n=  560 batch=    16      0.558 ms     34.876 us/item  51.65% of peak
+chol     cholesky               n=  560 batch=    64      2.455 ms     38.353 us/item   7.83% of peak
+chol     cholesky_solve_vec     n=  560 batch=    64      4.127 ms     64.491 us/item   4.70% of peak residual 4.8e-16
+chol     cholesky_solve_mat     n=  560 batch=    64      9.163 ms    143.174 us/item  14.68% of peak
+chol     matmul                 n=  560 batch=    64      1.876 ms     29.320 us/item  61.43% of peak
+chol     cholesky               n=  960 batch=    16      3.584 ms    223.969 us/item   6.75% of peak
+chol     cholesky_solve_vec     n=  960 batch=    16      6.198 ms    387.381 us/item   3.93% of peak residual 4.9e-16
+chol     cholesky_solve_mat     n=  960 batch=    16      9.760 ms    609.997 us/item  17.36% of peak
+chol     matmul                 n=  960 batch=    16      2.089 ms    130.557 us/item  69.50% of peak
+chol     cholesky               n=  960 batch=    64      6.578 ms    102.787 us/item  14.71% of peak
+chol     cholesky_solve_vec     n=  960 batch=    64      9.106 ms    142.288 us/item  10.70% of peak residual 4.9e-16
+chol     cholesky_solve_mat     n=  960 batch=    64     28.744 ms    449.125 us/item  23.57% of peak
+chol     matmul                 n=  960 batch=    64      6.461 ms    100.948 us/item  89.89% of peak
+chol     cholesky               n= 4480 batch=     4     40.020 ms  10005.066 us/item  15.36% of peak
+chol     cholesky_solve_vec     n= 4480 batch=     4     50.332 ms  12583.043 us/item  12.23% of peak residual 5.8e-16
+chol     cholesky_solve_mat     n= 4480 batch=     4     98.682 ms  24670.542 us/item  43.61% of peak
+chol     matmul                 n= 4480 batch=     4     38.644 ms   9660.963 us/item  95.46% of peak
+chol     cholesky               n= 4480 batch=    16    106.702 ms   6668.879 us/item  23.05% of peak
+chol     cholesky_solve_vec     n= 4480 batch=    16    118.706 ms   7419.102 us/item  20.74% of peak residual 6.1e-16
+chol     cholesky_solve_mat     n= 4480 batch=    16    327.876 ms  20492.269 us/item  52.50% of peak
+chol     matmul                 n= 4480 batch=    16    155.973 ms   9748.298 us/item  94.60% of peak
+merge    eigh                   n=   32 batch=    16      0.397 ms     24.799 us/item   0.06% of peak
+merge    eigh                   n=   32 batch=    64      0.394 ms      6.148 us/item   0.25% of peak
+merge    eigh                   n=  128 batch=    16      1.672 ms    104.498 us/item   0.93% of peak
+merge    eigh                   n=  128 batch=    64      2.429 ms     37.957 us/item   2.55% of peak
+merge    qr_1120x32             n=   32 batch=    16      8.373 ms    523.328 us/item   0.04% of peak
+merge    qr_1120x32             n=   32 batch=    64     12.214 ms    190.841 us/item   0.12% of peak
+merge    qr_1120x128            n=  128 batch=    16     88.038 ms   5502.386 us/item   0.07% of peak
+merge    qr_1120x128            n=  128 batch=    64    187.510 ms   2929.842 us/item   0.13% of peak
+coupling K_scatter              n=   28 batch=  2600      0.088 ms      0.034 us/item
+coupling Kt_gather              n=   28 batch=  2600      0.082 ms      0.032 us/item
+coupling K_scatter              n=   28 batch= 26000      0.139 ms      0.005 us/item
+coupling Kt_gather              n=   28 batch= 26000      0.081 ms      0.003 us/item
+
+BATCHING VERDICTS (per-item time at the largest batch / at the smallest; <= 0.8, or >= 20% of the FP64 roofline, counts as batched)
+  psd      eigh                   n=  136 rank 1  batches [650, 2600]    ratio   0.74 roofline   2.58%     116.777 ms at largest  batched  err_max 0.0e+00
+  psd      eigvalsh               n=  136 rank 1  batches [650, 2600]    ratio   0.86 roofline   1.16%     116.153 ms at largest  NOT BATCHED?
+  psd      newton_schulz_10       n=  136 rank 1  batches [650, 2600]    ratio   0.97 roofline  29.48%      47.785 ms at largest  batched  err_max 1.2e-02
+  psd      newton_schulz_20       n=  136 rank 1  batches [650, 2600]    ratio   0.98 roofline  29.87%      92.072 ms at largest  batched  err_max 3.0e-04
+  psd      newton_schulz_40       n=  136 rank 1  batches [650, 2600]    ratio   0.98 roofline  30.04%     180.843 ms at largest  batched  err_max 1.2e-08
+  psd      qdwh_polar             n=  136 rank 1  batches [650, 2600]    ratio   0.82 roofline    -        901.821 ms at largest  NOT BATCHED?  err_max 2.1e-15
+  psd      jacobi_cold_6          n=  136 rank 1  batches [650, 2600]    ratio   0.96 roofline   0.90%    2005.427 ms at largest  NOT BATCHED?  err_max 3.0e-03
+  psd      jacobi_warm_1          n=  136 rank 1  batches [650, 2600]    ratio   0.98 roofline   1.28%     341.600 ms at largest  NOT BATCHED?  err_max 6.3e-04
+  psd      jacobi_warm_2          n=  136 rank 1  batches [650, 2600]    ratio   0.96 roofline   1.10%     670.753 ms at largest  NOT BATCHED?  err_max 2.9e-04
+  psd      lowrank_p8_s1          n=  136 rank 1  batches [650, 2600]    ratio   0.98 roofline   0.21%      96.221 ms at largest  NOT BATCHED?  err_max 1.2e-03
+  psd      lowrank_p8_s2          n=  136 rank 1  batches [650, 2600]    ratio   0.99 roofline   0.16%     191.838 ms at largest  NOT BATCHED?  err_max 1.2e-03
+  psd      eigh                   n=  136 rank 4  batches [650, 2600]    ratio   0.85 roofline   2.59%     116.485 ms at largest  NOT BATCHED?  err_max 0.0e+00
+  psd      eigvalsh               n=  136 rank 4  batches [650, 2600]    ratio   0.85 roofline   1.18%     113.821 ms at largest  NOT BATCHED?
+  psd      newton_schulz_10       n=  136 rank 4  batches [650, 2600]    ratio   0.97 roofline  29.56%      47.660 ms at largest  batched  err_max 1.1e-02
+  psd      newton_schulz_20       n=  136 rank 4  batches [650, 2600]    ratio   0.97 roofline  29.88%      92.042 ms at largest  batched  err_max 3.0e-04
+  psd      newton_schulz_40       n=  136 rank 4  batches [650, 2600]    ratio   0.98 roofline  30.05%     180.832 ms at largest  batched  err_max 1.2e-08
+  psd      qdwh_polar             n=  136 rank 4  batches [650, 2600]    ratio   0.82 roofline    -        901.706 ms at largest  NOT BATCHED?  err_max 2.2e-15
+  psd      jacobi_cold_6          n=  136 rank 4  batches [650, 2600]    ratio   0.96 roofline   0.90%    2006.178 ms at largest  NOT BATCHED?  err_max 2.4e-03
+  psd      jacobi_warm_1          n=  136 rank 4  batches [650, 2600]    ratio   0.98 roofline   1.28%     341.641 ms at largest  NOT BATCHED?  err_max 4.6e-04
+  psd      jacobi_warm_2          n=  136 rank 4  batches [650, 2600]    ratio   0.96 roofline   1.10%     670.917 ms at largest  NOT BATCHED?  err_max 2.6e-04
+  psd      lowrank_p8_s1          n=  136 rank 4  batches [650, 2600]    ratio   0.99 roofline   0.21%      96.214 ms at largest  NOT BATCHED?  err_max 8.4e-04
+  psd      lowrank_p8_s2          n=  136 rank 4  batches [650, 2600]    ratio   0.99 roofline   0.16%     191.804 ms at largest  NOT BATCHED?  err_max 8.4e-04
+  psd      eigh                   n=  816 rank 1  batches [64, 256]      ratio   0.80 roofline  11.92%     538.671 ms at largest  NOT BATCHED?  err_max 0.0e+00
+  psd      eigvalsh               n=  816 rank 1  batches [64, 256]      ratio   0.79 roofline   5.49%     519.616 ms at largest  batched
+  psd      newton_schulz_10       n=  816 rank 1  batches [64, 256]      ratio   1.00 roofline  75.99%     394.254 ms at largest  batched  err_max 2.5e-02
+  psd      newton_schulz_20       n=  816 rank 1  batches [64, 256]      ratio   1.00 roofline  76.22%     767.423 ms at largest  batched  err_max 5.7e-04
+  psd      newton_schulz_40       n=  816 rank 1  batches [64, 256]      ratio   1.00 roofline  76.30%    1514.454 ms at largest  batched  err_max 1.6e-08
+  psd      qdwh_polar             n=  816 rank 1  batches [64, 256]      ratio   0.29 roofline    -      22426.601 ms at largest  batched  err_max 1.5e-15
+  psd      jacobi_warm_1          n=  816 rank 1  batches [64]           ratio    -   roofline   1.35%    1714.323 ms at largest  one batch size only  err_max 3.7e-04
+  psd      jacobi_warm_2          n=  816 rank 1  batches [64]           ratio    -   roofline   1.16%    3367.975 ms at largest  one batch size only  err_max 1.8e-04
+  psd      lowrank_p8_s1          n=  816 rank 1  batches [64, 256]      ratio   0.81 roofline   4.73%      14.781 ms at largest  NOT BATCHED?  err_max 7.4e-04
+  psd      lowrank_p8_s2          n=  816 rank 1  batches [64, 256]      ratio   0.81 roofline   3.92%      28.569 ms at largest  NOT BATCHED?  err_max 7.4e-04
+  psd      eigh                   n=  816 rank 4  batches [64, 256]      ratio   0.80 roofline  11.89%     539.858 ms at largest  NOT BATCHED?  err_max 0.0e+00
+  psd      eigvalsh               n=  816 rank 4  batches [64, 256]      ratio   0.79 roofline   5.49%     519.429 ms at largest  batched
+  psd      newton_schulz_10       n=  816 rank 4  batches [64, 256]      ratio   1.01 roofline  76.09%     393.706 ms at largest  batched  err_max 2.5e-02
+  psd      newton_schulz_20       n=  816 rank 4  batches [64, 256]      ratio   1.01 roofline  76.31%     766.534 ms at largest  batched  err_max 5.5e-04
+  psd      newton_schulz_40       n=  816 rank 4  batches [64, 256]      ratio   1.01 roofline  76.43%    1511.857 ms at largest  batched  err_max 1.7e-08
+  psd      qdwh_polar             n=  816 rank 4  batches [64, 256]      ratio   0.29 roofline    -      22424.385 ms at largest  batched  err_max 1.6e-15
+  psd      jacobi_warm_1          n=  816 rank 4  batches [64]           ratio    -   roofline   1.35%    1714.917 ms at largest  one batch size only  err_max 3.2e-04
+  psd      jacobi_warm_2          n=  816 rank 4  batches [64]           ratio    -   roofline   1.16%    3368.439 ms at largest  one batch size only  err_max 1.5e-04
+  psd      lowrank_p8_s1          n=  816 rank 4  batches [64, 256]      ratio   0.81 roofline   4.73%      14.787 ms at largest  NOT BATCHED?  err_max 7.4e-04
+  psd      lowrank_p8_s2          n=  816 rank 4  batches [64, 256]      ratio   0.81 roofline   3.92%      28.560 ms at largest  NOT BATCHED?  err_max 7.4e-04
+  chol     cholesky               n=   16         batches [2600, 10400]  ratio   0.46 roofline   0.25%       0.286 ms at largest  batched
+  chol     cholesky_solve_vec     n=   16         batches [2600, 10400]  ratio   0.50 roofline   0.25%       0.401 ms at largest  batched
+  chol     cholesky_solve_mat     n=   16         batches [2600, 10400]  ratio   0.65 roofline   0.61%       0.831 ms at largest  batched
+  chol     matmul                 n=   16         batches [2600, 10400]  ratio   0.37 roofline   3.63%       0.120 ms at largest  batched
+  chol     cholesky               n=   30         batches [2600, 10400]  ratio   0.71 roofline   0.59%       0.812 ms at largest  batched
+  chol     cholesky_solve_vec     n=   30         batches [2600, 10400]  ratio   0.72 roofline   0.44%       1.321 ms at largest  batched
+  chol     cholesky_solve_mat     n=   30         batches [2600, 10400]  ratio   0.81 roofline   1.37%       2.454 ms at largest  NOT BATCHED?
+  chol     matmul                 n=   30         batches [2600, 10400]  ratio   0.38 roofline  15.60%       0.185 ms at largest  batched
+  chol     cholesky               n=  136         batches [2600, 10400]  ratio   0.87 roofline   3.72%      12.028 ms at largest  NOT BATCHED?
+  chol     cholesky_solve_vec     n=  136         batches [2600, 10400]  ratio   0.81 roofline   3.17%      14.743 ms at largest  NOT BATCHED?
+  chol     cholesky_solve_mat     n=  136         batches [2600, 10400]  ratio   0.86 roofline   6.29%      49.784 ms at largest  NOT BATCHED?
+  chol     matmul                 n=  136         batches [2600, 10400]  ratio   0.95 roofline  34.30%       7.824 ms at largest  batched
+  chol     cholesky               n=  560         batches [16, 64]       ratio   0.41 roofline   7.83%       2.455 ms at largest  batched
+  chol     cholesky_solve_vec     n=  560         batches [16, 64]       ratio   0.35 roofline   4.70%       4.127 ms at largest  batched
+  chol     cholesky_solve_mat     n=  560         batches [16, 64]       ratio   0.63 roofline  14.68%       9.163 ms at largest  batched
+  chol     matmul                 n=  560         batches [16, 64]       ratio   0.84 roofline  61.43%       1.876 ms at largest  batched
+  chol     cholesky               n=  960         batches [16, 64]       ratio   0.46 roofline  14.71%       6.578 ms at largest  batched
+  chol     cholesky_solve_vec     n=  960         batches [16, 64]       ratio   0.37 roofline  10.70%       9.106 ms at largest  batched
+  chol     cholesky_solve_mat     n=  960         batches [16, 64]       ratio   0.74 roofline  23.57%      28.744 ms at largest  batched
+  chol     matmul                 n=  960         batches [16, 64]       ratio   0.77 roofline  89.89%       6.461 ms at largest  batched
+  chol     cholesky               n= 4480         batches [4, 16]        ratio   0.67 roofline  23.05%     106.702 ms at largest  batched
+  chol     cholesky_solve_vec     n= 4480         batches [4, 16]        ratio   0.59 roofline  20.74%     118.706 ms at largest  batched
+  chol     cholesky_solve_mat     n= 4480         batches [4, 16]        ratio   0.83 roofline  52.50%     327.876 ms at largest  batched
+  chol     matmul                 n= 4480         batches [4, 16]        ratio   1.01 roofline  94.60%     155.973 ms at largest  batched
+  merge    eigh                   n=   32         batches [16, 64]       ratio   0.25 roofline   0.25%       0.394 ms at largest  batched
+  merge    eigh                   n=  128         batches [16, 64]       ratio   0.36 roofline   2.55%       2.429 ms at largest  batched
+  merge    qr_1120x32             n=   32         batches [16, 64]       ratio   0.36 roofline   0.12%      12.214 ms at largest  batched
+  merge    qr_1120x128            n=  128         batches [16, 64]       ratio   0.53 roofline   0.13%     187.510 ms at largest  batched
+  coupling K_scatter              n=   28         batches [2600, 26000]  ratio   0.16 roofline    -          0.139 ms at largest  batched
+  coupling Kt_gather              n=   28         batches [2600, 26000]  ratio   0.10 roofline    -          0.081 ms at largest  batched
+saved /scratch/residual-controller/trellis-pdhg/runs/bench/primitives.json

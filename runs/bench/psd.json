@@ -1,0 +1,406 @@
+{
+  "env": {
+    "python": "3.11.18",
+    "jax": "0.10.2",
+    "jaxlib": "0.10.2",
+    "backend": "gpu",
+    "devices": [
+      "cuda:0"
+    ],
+    "device_kind": "NVIDIA A100-SXM4-80GB",
+    "xla_flags": "",
+    "x64": true,
+    "platform_version": "PJRT C API\ncuda 12090",
+    "nvidia_smi": [
+      "0, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "1, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "2, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "3, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "4, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "5, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "6, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB",
+      "7, NVIDIA A100-SXM4-80GB, 550.163.01, 81920 MiB"
+    ]
+  },
+  "rows": [
+    {
+      "group": "psd",
+      "name": "eigh",
+      "n": 16,
+      "batch": 650,
+      "seconds": 0.0002874620258808136,
+      "compile_s": 0.148,
+      "per_item_us": 0.4422492705858671,
+      "order": 1,
+      "positives": "4-4",
+      "gflops": 83.35570559825827,
+      "roofline": 0.00427465156914145,
+      "err_median": 0.0,
+      "err_max": 0.0
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p8",
+      "n": 16,
+      "batch": 650,
+      "seconds": 0.0005622543394565582,
+      "compile_s": 0.369,
+      "per_item_us": 0.8650066760870126,
+      "order": 1,
+      "positives": "4-4",
+      "gflops": 66.29312996681618,
+      "roofline": 0.0033996476906059583,
+      "err_median": 2.3509355437833606e-15,
+      "err_max": 5.671905027728017e-15,
+      "res_max": 2.8640511201654733e-15
+    },
+    {
+      "group": "psd",
+      "name": "eigh",
+      "n": 16,
+      "batch": 2600,
+      "seconds": 0.0006170384585857391,
+      "compile_s": 0.087,
+      "per_item_us": 0.2373224840714381,
+      "order": 1,
+      "positives": "4-4",
+      "gflops": 155.33294345976637,
+      "roofline": 0.00796579197229571,
+      "err_median": 0.0,
+      "err_max": 0.0
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p8",
+      "n": 16,
+      "batch": 2600,
+      "seconds": 0.0011220723390579224,
+      "compile_s": 0.391,
+      "per_item_us": 0.4315662842530471,
+      "order": 1,
+      "positives": "4-4",
+      "gflops": 132.87414261114196,
+      "roofline": 0.006814058595443177,
+      "err_median": 2.3050585393164866e-15,
+      "err_max": 8.89283220801742e-06,
+      "res_max": 1.0280219667343854e-05
+    },
+    {
+      "group": "psd",
+      "name": "eigh",
+      "n": 136,
+      "batch": 650,
+      "seconds": 0.03716971352696419,
+      "compile_s": 0.245,
+      "per_item_us": 57.18417465686798,
+      "order": 2,
+      "positives": "4-4",
+      "gflops": 395.89806333387344,
+      "roofline": 0.020302464786352482,
+      "err_median": 0.0,
+      "err_max": 0.0
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p8",
+      "n": 136,
+      "batch": 650,
+      "seconds": 0.0009484030306339264,
+      "compile_s": 0.542,
+      "per_item_us": 1.4590815855906558,
+      "order": 2,
+      "positives": "4-4",
+      "gflops": 1049.9097618176468,
+      "roofline": 0.053841526247058805,
+      "err_median": 2.1711586225045784e-05,
+      "err_max": 2.9953866470295713e-05,
+      "res_max": 2.370879356148095e-05
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p16",
+      "n": 136,
+      "batch": 650,
+      "seconds": 0.0018150024116039276,
+      "compile_s": 0.974,
+      "per_item_us": 2.792311402467581,
+      "order": 2,
+      "positives": "4-4",
+      "gflops": 1346.600524811507,
+      "roofline": 0.06905643716982088,
+      "err_median": 1.7320721187112457e-05,
+      "err_max": 2.4509152694466868e-05,
+      "res_max": 2.1238996194782175e-05
+    },
+    {
+      "group": "psd",
+      "name": "eigh",
+      "n": 136,
+      "batch": 2600,
+      "seconds": 0.12808874249458313,
+      "compile_s": 0.248,
+      "per_item_us": 49.264900959455055,
+      "order": 2,
+      "positives": "4-4",
+      "gflops": 459.53820182510776,
+      "roofline": 0.02356606163205681,
+      "err_median": 0.0,
+      "err_max": 0.0
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p8",
+      "n": 136,
+      "batch": 2600,
+      "seconds": 0.0028235316276550293,
+      "compile_s": 0.639,
+      "per_item_us": 1.085973702944242,
+      "order": 2,
+      "positives": "4-4",
+      "gflops": 1410.627159614245,
+      "roofline": 0.07233985433919206,
+      "err_median": 2.1694160600326047e-05,
+      "err_max": 3.132956010390259e-05,
+      "res_max": 2.4751115395878648e-05
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p16",
+      "n": 136,
+      "batch": 2600,
+      "seconds": 0.005793701857328415,
+      "compile_s": 0.974,
+      "per_item_us": 2.228346868203236,
+      "order": 2,
+      "positives": "4-4",
+      "gflops": 1687.406953403027,
+      "roofline": 0.08653368991810395,
+      "err_median": 1.7220677128402978e-05,
+      "err_max": 2.6463210417148807e-05,
+      "res_max": 2.1663697673150537e-05
+    },
+    {
+      "group": "psd",
+      "name": "eigh",
+      "n": 816,
+      "batch": 256,
+      "seconds": 0.562559213489294,
+      "compile_s": 0.086,
+      "per_item_us": 2197.496927692555,
+      "order": 3,
+      "positives": "4-4",
+      "gflops": 2225.2802278703125,
+      "roofline": 0.11411693476258013,
+      "err_median": 0.0,
+      "err_max": 0.0
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p8",
+      "n": 816,
+      "batch": 256,
+      "seconds": 0.0042559914290905,
+      "compile_s": 0.724,
+      "per_item_us": 16.624966519884765,
+      "order": 3,
+      "positives": "4-4",
+      "gflops": 2688.9524226428252,
+      "roofline": 0.1378949960329654,
+      "err_median": 1.0196202747794363e-05,
+      "err_max": 1.2184450467439353e-05,
+      "res_max": 9.142861711831322e-06
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p16",
+      "n": 816,
+      "batch": 256,
+      "seconds": 0.005533747375011444,
+      "compile_s": 1.167,
+      "per_item_us": 21.616200683638453,
+      "order": 3,
+      "positives": "4-4",
+      "gflops": 4329.410582815131,
+      "roofline": 0.2220210555289811,
+      "err_median": 9.837219904786904e-06,
+      "err_max": 1.1746269931862621e-05,
+      "res_max": 8.90393726051285e-06
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p8",
+      "n": 816,
+      "batch": 1024,
+      "seconds": 0.015291690826416016,
+      "compile_s": 1.33,
+      "per_item_us": 14.93329182267189,
+      "order": 3,
+      "positives": "4-4",
+      "gflops": 2993.562607015439,
+      "roofline": 0.15351603112899687,
+      "err_median": 1.0144670632608606e-05,
+      "err_max": 1.2123308348155674e-05,
+      "res_max": 8.98483895808153e-06
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p16",
+      "n": 816,
+      "batch": 1024,
+      "seconds": 0.01883764937520027,
+      "compile_s": 1.274,
+      "per_item_us": 18.396141967969015,
+      "order": 3,
+      "positives": "4-4",
+      "gflops": 5087.230146568177,
+      "roofline": 0.2608835972599065,
+      "err_median": 9.77744410468241e-06,
+      "err_max": 1.1766622528420945e-05,
+      "res_max": 8.788020804231348e-06
+    }
+  ],
+  "verdicts": [
+    {
+      "group": "psd",
+      "name": "eigh",
+      "n": 16,
+      "batches": [
+        650,
+        2600
+      ],
+      "per_item_us": [
+        0.4422492705858671,
+        0.2373224840714381
+      ],
+      "per_item_ratio": 0.5366260610380353,
+      "roofline_at_largest": 0.00796579197229571,
+      "seconds_at_largest": 0.0006170384585857391,
+      "err_max": 0.0,
+      "verdict": "batched"
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p8",
+      "n": 16,
+      "batches": [
+        650,
+        2600
+      ],
+      "per_item_us": [
+        0.8650066760870126,
+        0.4315662842530471
+      ],
+      "per_item_ratio": 0.49891670918113823,
+      "roofline_at_largest": 0.006814058595443177,
+      "seconds_at_largest": 0.0011220723390579224,
+      "err_max": 8.89283220801742e-06,
+      "verdict": "batched"
+    },
+    {
+      "group": "psd",
+      "name": "eigh",
+      "n": 136,
+      "batches": [
+        650,
+        2600
+      ],
+      "per_item_us": [
+        57.18417465686798,
+        49.264900959455055
+      ],
+      "per_item_ratio": 0.8615128443326794,
+      "roofline_at_largest": 0.02356606163205681,
+      "seconds_at_largest": 0.12808874249458313,
+      "err_max": 0.0,
+      "verdict": "NOT BATCHED?"
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p8",
+      "n": 136,
+      "batches": [
+        650,
+        2600
+      ],
+      "per_item_us": [
+        1.4590815855906558,
+        1.085973702944242
+      ],
+      "per_item_ratio": 0.7442857984563113,
+      "roofline_at_largest": 0.07233985433919206,
+      "seconds_at_largest": 0.0028235316276550293,
+      "err_max": 3.132956010390259e-05,
+      "verdict": "batched"
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p16",
+      "n": 136,
+      "batches": [
+        650,
+        2600
+      ],
+      "per_item_us": [
+        2.792311402467581,
+        2.228346868203236
+      ],
+      "per_item_ratio": 0.7980294985129646,
+      "roofline_at_largest": 0.08653368991810395,
+      "seconds_at_largest": 0.005793701857328415,
+      "err_max": 2.6463210417148807e-05,
+      "verdict": "batched"
+    },
+    {
+      "group": "psd",
+      "name": "eigh",
+      "n": 816,
+      "batches": [
+        256
+      ],
+      "per_item_us": [
+        2197.496927692555
+      ],
+      "per_item_ratio": null,
+      "roofline_at_largest": 0.11411693476258013,
+      "seconds_at_largest": 0.562559213489294,
+      "err_max": 0.0,
+      "verdict": "one batch size only"
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p8",
+      "n": 816,
+      "batches": [
+        256,
+        1024
+      ],
+      "per_item_us": [
+        16.624966519884765,
+        14.93329182267189
+      ],
+      "per_item_ratio": 0.8982449260761217,
+      "roofline_at_largest": 0.15351603112899687,
+      "seconds_at_largest": 0.015291690826416016,
+      "err_max": 1.2123308348155674e-05,
+      "verdict": "NOT BATCHED?"
+    },
+    {
+      "group": "psd",
+      "name": "lowrank_p16",
+      "n": 816,
+      "batches": [
+        256,
+        1024
+      ],
+      "per_item_us": [
+        21.616200683638453,
+        18.396141967969015
+      ],
+      "per_item_ratio": 0.8510349361205396,
+      "roofline_at_largest": 0.2608835972599065,
+      "seconds_at_largest": 0.01883764937520027,
+      "err_max": 1.1766622528420945e-05,
+      "verdict": "batched"
+    }
+  ]
+}

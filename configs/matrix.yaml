@@ -1,19 +1,18 @@
 # Run matrix (plan sections 1 and 15.2), read by launch.py. Run names refer to configs/runs/.
 stage1:
   mode: timing                   # one exclusive job per GPU; all wall-clock comparisons come from this mode
-  small_kappa_baselines: true    # false drops the GPU-7 baselines
   tuning:                        # short count-scored step-size tuning (7.3), throughput mode, before the solves
     mode: throughput
-    configs: [A, A_lowrank, A_k2, B, C_a_r16, C_b_r16, D, A_k3_small, A_small, A_k2_small]
+    configs: [A, A_lowrank, A_k2, B, C_a_r16, C_b_r16, D, A_k3]
   jobs:
-    - {gpu: 0, runs: [A, A_lowrank], task: T3_translate_rotate, sequential: true}   # exact vs low-rank projection, same GPU
+    - {gpu: 0, runs: [A], task: T3_translate_rotate}
     - {gpu: 1, runs: [A_k2], task: T3_translate_rotate}
     - {gpu: 2, runs: [B], task: T3_translate_rotate}
     - {gpu: 3, runs: [C_a_r16], task: T3_translate_rotate}
     - {gpu: 4, runs: [C_b_r16], task: T3_translate_rotate}
     - {gpu: 5, runs: [D], task: T3_translate_rotate}
-    - {gpu: 6, runs: [A_k3_small], task: T2_rotate_90}
-    - {gpu: 7, runs: [A_small, A_k2_small], task: T2_rotate_90, sequential: true, needs: small_kappa_baselines}
+    - {gpu: 6, runs: [A_k3], task: T3_translate_rotate}         # stays only if M3 shows it is fast enough (plan 1)
+    - {gpu: 7, runs: [A_lowrank], task: T3_translate_rotate}    # against A: low-rank vs exact projection at order 1
 
 stage2:                          # 21 jobs in 3 waves
   mode: timing

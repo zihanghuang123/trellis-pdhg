@@ -1,5 +1,0 @@
-# Stage-1 baseline for A_k3_small: same task, horizon and mode set.
-run_name: A_k2_small
-task: T2_rotate_90
-trellis: {N: 8}
-relaxation: {order: 2}

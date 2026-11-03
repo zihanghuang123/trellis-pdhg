@@ -31,7 +31,7 @@
 |---|---|---|---|---|
 | **A** (default) | exact (cyclic reduction) | SDP moment relaxation | order κ (default 1), exact `eigh` projection | 3 (Opt. B), 4, 5 |
 | **A-lowrank** | exact | SDP κ = 1 | as A, with the low-rank projection (§8.2) | 3, 4 |
-| **A-κ2 / A-κ3** | exact | SDP, κ = 2 / κ = 3 | κ = 3 only on small instances | 3, 4 |
+| **A-κ2 / A-κ3** | exact | SDP, κ = 2 / κ = 3 | κ = 3 stays only if fast enough (below) | 3, 4 |
 | **A-reg** | exact | SDP, same θ-regions as B | `theta_splits: 8` | 3 (regions) |
 | **B** | exact | Taylor model + certified error band | `theta_splits`, `lambda_splits` | 3 (Opt. A) |
 | **C-a** | low-rank, option (a): compressed exact responses | SDP κ = 1 | rank r ∈ {4, 16, 64} | 4, 10 |
@@ -45,16 +45,17 @@ The table lists every configuration. **They are run in stages, starting with a l
 
 | GPU | Job | Task |
 |---|---|---|
-| 0 | A (exact tree, SDP κ = 1, exact `eigh`), then A-lowrank, one after the other on the same GPU | T3 |
+| 0 | A (exact tree, SDP κ = 1, exact `eigh`) | T3 |
 | 1 | A-κ2 | T3 |
 | 2 | B (exact tree, Taylor) | T3 |
 | 3 | C-a, r = 16 | T3 |
 | 4 | C-b, r = 16 (Section 12) | T3 |
 | 5 | D (no tree) | T3 |
-| 6 | A-κ3, small instance (N = 8) | T2 |
-| 7 | small-instance baselines: A (κ = 1), then A-κ2, run one after the other on the same N = 8 instance | T2 |
+| 6 | A-κ3 | T3 |
+| 7 | A-lowrank | T3 |
 
-- GPU 7 would otherwise sit idle. Without these baselines, A-κ3 has nothing at the same size to compare against. Set `stage1.small_kappa_baselines: false` to drop them.
+- **Every job runs at the full horizon, N = 32.** A-κ3 shares its task and horizon with A and A-κ2, so those two are its baselines.
+- **A-κ3 stays only if it is fast enough.** M3 measures its time per round. If its solve is too slow to be useful, A-κ3 is removed from the matrix, not shrunk to a smaller instance: a too-slow solve is pointless.
 - A and A-lowrank compare the two projections at order 1 on the real problem: `eigh` wins the `--bench_psd` micro-benchmark at 16×16, but the result can change with real matrices and with size. They stay paired in stage 2 and in the horizon sweep.
 - One seed (0). The solver is deterministic. Randomized rounding draws its own samples inside extraction.
 - Each job stops when the P_δ gap closes (§10.5): mismatch ≤ δ and $U_{\text{flow}} - L \le \eta$. The round cap and time cap are safety stops only.
@@ -98,10 +99,10 @@ trellis-pdhg/                 # repo root; every script lives here
   setup.sh                    # creates the `trellis` conda environment (§3)
   configs/
     base.yaml                 # all defaults (§16)
-    runs/A.yaml  A_lowrank.yaml  A_k2.yaml  A_k3_small.yaml  A_small.yaml  A_k2_small.yaml  A_reg.yaml  B.yaml
+    runs/A.yaml  A_lowrank.yaml  A_k2.yaml  A_k3.yaml  A_reg.yaml  B.yaml
          C_a_r4.yaml C_a_r16.yaml C_a_r64.yaml
          C_b_r4.yaml C_b_r16.yaml C_b_r64.yaml C_b_r16_p4.yaml
-         D.yaml  A_noskip.yaml
+         D.yaml  A_noskip.yaml  ref_tiny_k2.yaml
     matrix.yaml               # stage1 (8 jobs + tuning), stage2, stage3
   push_model.py               # §4–§6: geometry, modes, graph, relaxations, data arrays, reference CPU solve
   run_trajopt.py              # §7–§12: PDHG, edge solvers, skipping, certificate, trees, safeguard, main loop
@@ -140,7 +141,7 @@ Shared helpers (YAML loading, index maps) can be duplicated between scripts. A l
 ### 4.2 Knot state and per-edge variables
 - **Knot state, SDP runs:** $x = (p_x, p_y, c, s, r_x, r_y)$, so $D = 6$. Here $(c, s)$ encode the slider rotation, and $r$ is the pusher center in the slider body frame.
 - **Knot state, Taylor runs (B):** $x = (p_x, p_y, \theta, r_x, r_y)$, so $D = 5$ (§5.2).
-- **Edge variables, SDP:** $v = (x_k, x_{k+1}, f_n, f_t, \tau) \in \mathbb{R}^{15}$. Non-contact edges set $f_n = f_t = \tau = 0$ through linear equalities, so they share the same 15-variable layout. Keeping one layout makes batching uniform (§6.2).
+- **Edge variables, SDP:** $v = (x_k, x_{k+1}, f_n, f_t, \tau) \in \mathbb{R}^{15}$. Non-contact edges set $f_n = f_t = \tau = 0$ through linear equalities. The constraint table (§4.5) always uses this layout. The moment relaxation then substitutes each edge type's linear equalities before lifting (§5.1.7), so the lifted vector differs per type: 12 variables on a contact edge, 8 on a free-to-free edge.
 
 ### 4.3 Modes
 - **Contact modes:** face $j \in \{0..3\}$ × type ∈ {stick, slide+, slide−}, which gives 12 modes.
@@ -207,7 +208,7 @@ The output of this section, for every **edge type**, is a set of homogeneous lin
 |---|---|---|
 | 1 | 1 + 15 + 120 = 136 | 16 |
 | 2 | C(19,4) = 3,876 | 136 |
-| 3 | C(21,6) = 54,264 | 816 (small instances only) |
+| 3 | C(21,6) = 54,264 | 816 |
 
 **5.1.2 Constraints in moments (slice $m_0 = 1$, then homogenized).**
 - **Moment matrix:** $\mathcal M_\kappa(m) \succeq 0$, where entry $(\alpha, \beta)$ is $m_{\alpha+\beta}$ over monomials of degree ≤ κ.
@@ -228,6 +229,7 @@ The output of this section, for every **edge type**, is a set of homogeneous lin
 
 **5.1.5 Vertex coupling (knob `relaxation.couple_second_moments`, default true).**
 - Coupled coordinates for each vertex: flow $m_0$, first moments of the knot state (6), and, if the knob is on, second moments of the knot state ($6\cdot7/2 = 21$). So $q = 28$ per vertex, or $q = 7$ with the knob off.
+- After linear elimination (§5.1.7) each coordinate is a sparse linear form in the edge's reduced $m$, for example $m_{r_x} = a\,m_0$ on a face-0 contact edge. Tex §2.1 allows any linear map that is consistent on true points, so vertices keep the same $q$.
 - An edge contributes its post-knot coordinates to the head vertex (sign $+$) and its pre-knot coordinates to the tail vertex (sign $-$). Flow appears with $+$ at the head and $-$ at the tail. The start supplies 1 and the goal absorbs 1.
 - The start edge's pre-knot moments are fixed by rows in the edge itself: $m_{x_0} = x_0 m_0$, $m_{x_0 x_0^\top} = x_0 x_0^\top m_0$. The same holds for the fixed parts of the goal knot.
 
@@ -237,7 +239,28 @@ The output of this section, for every **edge type**, is a set of homogeneous lin
 
 Store the PSD maps as sparse `(row, col, moment_index, coefficient)` lists for each edge type. They are the same for all time steps.
 
-**5.1.7 Removing redundant equality rows.** Multiplying linear equalities by monomials produces dependent rows (for example $(r_{x,0}-a)\,r_{x,1}$ and $(r_{x,1}-a)\,r_{x,0}$). Removing a dependent row leaves the set unchanged.
+**5.1.7 Linear elimination and redundant rows (`relaxation.eliminate_linear`, default true).** M1's first size table showed that almost all equality rows only restate linear equalities: $r_{k+1} = r_k$, $f_t = \mu f_n$, zero forces on a non-contact step. Lifted, each becomes one row per monomial, and together they force every moment matrix to be singular, so the PSD blocks have no interior.
+
+So each edge type solves its linear equalities first, $v = a + Z w$, and lifts only the free variables $w$ (the tail knot and $f_n$ stay free).
+
+| Size per edge, full form to reduced | κ = 1 | κ = 2 | κ = 3 |
+|---|---|---|---|
+| Contact (12 variables): moments | 136 to 91 | 3,876 to 1,820 | 54,264 to 18,564 |
+| Contact: moment matrix | 16 to 13 | 136 to 91 | 816 to 455 |
+| Contact: equality rows | 51 to 6 | 3,264–4,080 to at most 546 | 69,768–85,272 to at most 10,920 |
+| Free-to-free (8 variables): moments | 136 to 45 | 3,876 to 495 | 54,264 to 3,003 |
+| Free-to-free: moment matrix | 16 to 9 | 136 to 45 | 816 to 165 |
+| Free-to-free: equality rows | 92 to 1 | 5,728 to at most 45 | 109,344 to at most 495 |
+
+**It is the same outer set.** With the linear rows in force, a full moment vector is $m = T m_w$, where each row of $T$ writes one monomial of $v$ over the monomials of $w$.
+- $\mathcal M_\kappa(T m_w) = W \mathcal M_\kappa(m_w) W^\top$, and localizing blocks likewise, with $W$ of full column rank, so one is PSD exactly when the other is.
+- Each remaining row keeps the multipliers of its degree before substitution, so a row that becomes linear gains no extra multipliers. Adding them would be valid and tighter, but it would break the exact equality with the full form.
+- The bound row of a single-variable inequality moves into the box. At κ ≥ 2 its localizing block stays.
+- Rows that become constants or duplicates go, and so do inequalities that the equalities reduce to a positive constant (for example the step bound of a static slider).
+
+M1 checks all of this algebraically, per edge type and without a solver. M2 checks it numerically: both forms must give the same $J_{\text{rel}}$. At κ ≥ 2 the quadratic equalities still force null directions in the moment matrix; removing those is left until the solver shows they matter.
+
+After elimination, dependent rows can remain. Removing a dependent row leaves the set unchanged.
 - κ = 1 and run B: keep a maximal independent subset (pivoted QR on unit-norm rows), because the IPM's normal equations need full row rank (§8.1).
 - κ ≥ 2: drop rows equal up to scale. These rows are dualized (§8.3), so remaining dependence costs only step size.
 
@@ -310,14 +333,14 @@ M1 prints the resulting sizes per group of edge types. They set the size of the 
 - Save `problem.npz`: index arrays, edge-type ids, and all per-type matrices.
 
 ### 6.2 Batching by edge type
-- Group edge types into **shape buckets**: contact-mid, noncontact-mid, start, goal, and (for B) one bucket per region pattern. Each bucket has identical array shapes, padded within the bucket.
+- Group edge types into **shape buckets** by their reduced sizes (§5.1.7): contact-mid, noncontact-mid, start, goal, and (for B) one bucket per region pattern. Each bucket has identical array shapes, padded within the bucket.
 - Pad inequality rows as $0^\top m \ge -1$ (always slack, never active). Removing dependent rows (§5.1.7) makes equality counts differ within a bucket, so equality rows are padded too: a padded row is masked out, with a unit diagonal in the normal equations and a zero multiplier. A padded row must never reach the factorization as a zero row.
 - For each edge: `type_id`, `tail_vertex`, `head_vertex`, `tail_slots` and `head_slots` (indices of its coupled coordinates in the vertex price vector), `layer`.
 - Store matrices **per type**. Edges index into them with `type_id`, so memory scales with the number of types (≈ transitions per layer), not with $E$.
 
 ### 6.3 Coupling operator $K$ without sparse matrices
-- $Kx$: `jax.ops.segment_sum` of each edge's signed coupled coordinates into vertex slots.
-- $K^\top p$: gather the vertex prices at each edge's slots, with signs.
+- $Kx$: `jax.ops.segment_sum` of each edge's signed coupled coordinates into vertex slots. The coordinates are a small sparse matrix per edge type times $m_e$ (§5.1.5).
+- $K^\top p$: gather the vertex prices at each edge's slots, with signs, and multiply by the transpose of the same matrix.
 - Row and column absolute sums for diagonal step sizes are computed once with the same gather/scatter.
 
 ---
@@ -387,14 +410,14 @@ M1 prints the resulting sizes per group of edge types. They set the size of the 
 ### 8.1 Polyhedral block, κ = 1 and run B: batched exact-to-tolerance IPM
 - Primal-dual Mehrotra predictor–corrector for $\min \tfrac12 m^\top H m + f^\top m$ subject to equality rows $A m = 0$, inequality rows $G m \ge h$ (only the $m_0 \le 1$ row has a nonzero right-hand side), and variable bounds.
 - $H = \mathrm{diag}(T^{-1})$ is diagonal. Eliminate the bounds diagonally, then solve the reduced normal equations with dense Cholesky. There are two forms, and the IPM uses the smaller per bucket:
-  - variable form, size = number of variables: 136 for κ = 1, about 21 for B;
-  - row form, size = independent equality rows + inequality rows, whose counts M1 prints (§5.1.7). For κ = 1 it should be well below 136; for B, with its tangent-plane rows, the variable form is smaller.
+  - variable form, size = number of variables: at most 91 for κ = 1 after elimination, about 21 for B;
+  - row form, size = equality rows + inequality rows, whose counts M1 prints (§5.1.7). The box entries' two-sided rows stay diagonal, and because they scale with $m_0$ they add a rank-one term for that column, not a row. For κ = 1 this is about 3–10; for B, with its tangent-plane rows, the variable form is smaller.
 - Fixed iteration cap (`ipm_iters`, default 40), tolerance `ipm_tol` 1e-11. Use `vmap` over a bucket.
-- **M0 result (`--bench_linalg`).** Cholesky at 136×136 takes 3.46 ms for 2,600 matrices and 13.2 ms for 10,400: 1.3 µs per matrix, per-item ratio 0.96, 3.4 % of the FLOP roofline, about 8 % of the memory bandwidth. It does not loop matrix by matrix the way `eigh` does at this size (45 µs each), but it is well below the 30 % a plain matmul reaches at the same size, so it **fails the §0 rule**. With solves it takes 4.5 ms, so 40 iterations over all edges would cost about 180 ms per round, which rules out the seconds target. At 30×30 it is cheap (0.28 ms). The fixes below come before M3 starts, in this order, each measured:
-  1. the row form, which shrinks the matrices;
+- **M0 result (`--bench_linalg`).** Cholesky at 136×136 takes 3.46 ms for 2,600 matrices and 13.2 ms for 10,400: 1.3 µs per matrix, per-item ratio 0.96, 3.4 % of the FLOP roofline, about 8 % of the memory bandwidth. It does not loop matrix by matrix the way `eigh` does at this size (45 µs each), but it is well below the 30 % a plain matmul reaches at the same size, so it **fails the §0 rule**. With solves it takes 4.5 ms, so 40 iterations over all edges would cost about 180 ms per round, which rules out the seconds target. At 30×30 it is cheap (0.28 ms). The fixes, in this order, each measured before M3 relies on it:
+  1. linear elimination (§5.1.7) plus the row form. M1's table gives the sizes: without elimination the row form is still 63–143 rows, about 90 ms per round; with it, about 3–10 rows, about 15 ms per round with the library kernels (extrapolated from the bench, Cholesky and solves only, all edges, not yet measured);
   2. compaction (§9.3), so only edges that fail the zero test enter the IPM;
   3. the face cache (§9.2) on the SDP runs, which replaces most solves with a matrix–vector product;
-  4. a hand-written blocked batched Cholesky built on matmuls, if the factorization still dominates.
+  4. a small hand-written factorization, if the library call's fixed overhead (about 0.1 ms per call in the bench's fit) dominates at the real size.
 - Return the solution, the multipliers of every row, and the **active set** (rows with slack < 1e-9 and multiplier > 1e-9).
 - At the end, clean the output: if every entry of the solution is < 1e-13 in magnitude, set it to exactly 0.
 
@@ -408,7 +431,7 @@ M1 prints the resulting sizes per group of edge types. They set the size of the 
   - `qdwh` (`jax.scipy.linalg.polar`): exact, but its internal QR runs matrix by matrix: 0.9 s per round at 136, about 20 s per call at 816. **Not used.**
   - `jacobi`, a batched parallel-cyclic Jacobi in plain JAX: batched across matrices, but every one of its n − 1 rotation steps per sweep rewrites all matrices to GPU memory, so it is memory-bound (~1 % of the roofline, 0.34 s per warm sweep). **Not used**; a fast version would need a custom kernel that keeps each matrix on chip.
   - **`lowrank` (the chosen method):** track the positive eigenspace from the previous round's basis by block-Krylov Rayleigh–Ritz on span$[Q, XQ]$, at O(n²p) per matrix instead of O(n³). Moment matrices approach low rank as the relaxation converges. It uses only matrix products and eigendecompositions of at most 2p × 2p (≤ 32, where cuSOLVER batches). Its orthonormalization comes from the small Gram matrix, because QR above 32 columns also runs matrix by matrix; the first version used QR and inherited the loop (96 ms). It reports its own residual $\|Xv - \theta v\| / \|X\|_F$ over the positive Ritz pairs. A failed check sends that matrix alone to the fallback (compaction, §9.3). `--bench_psd` measures it against exact `eigh` at the order-1, -2 and -3 sizes.
-  - Even a perfectly batched full eigendecomposition costs about 60 GFLOP per κ = 2 round (≥ 3 ms at peak), so the seconds target at κ = 2 relies on warm starts and low rank, not on batching alone. At κ = 3 the floor is memory traffic: reading and writing 816×816 matrices costs tens of ms per round at 2,600 edges, a few ms on the small instance.
+  - Even a perfectly batched full eigendecomposition costs about 60 GFLOP per κ = 2 round (≥ 3 ms at peak), so the seconds target at κ = 2 relies on warm starts and low rank, not on batching alone. At κ = 3 the floor is memory traffic: reading and writing 816×816 matrices costs tens of ms per round at 2,600 edges, before linear elimination shrinks them (§5.1.7).
   - **M0 result (`--bench_psd`), projection time per round at 2,600 edges, on synthetic near-low-rank matrices with a warm basis:**
 
     | Order | Size | exact `eigh` | `lowrank`, p = 8 | error at p = 8 |
@@ -424,7 +447,7 @@ M1 prints the resulting sizes per group of edge types. They set the size of the 
 - The optional frozen-rank Jacobian needs eigenvectors: `eigh` at κ = 1; above κ = 1 the low-rank tracker's Ritz vectors give the eigenvectors of the positive part, which is the face that Jacobian freezes.
 
 ### 8.3 κ ≥ 2: split the equalities too (deviation, §19)
-- For κ ≥ 2 the polyhedral block has thousands of variables, which is too large for a dense IPM on each edge.
+- For κ ≥ 2 the polyhedral block is still too large for a dense IPM on each edge, even after elimination (§5.1.7): 1,820 variables and up to 546 equality rows on a contact edge at κ = 2.
 - So dualize the equality rows as well (edge-local duals). The primal step for $m_e$ then becomes a **box projection** (bounds plus $0 \le m_0 \le 1$), which is exact and trivial.
 - Inequality rows are already handled by the localizing PSD blocks plus their linear copies. Dualize those linear rows too, with a nonnegative-cone dual projection.
 - Flag `qp_block: exact_ipm | split_rows`. Default `exact_ipm` for κ = 1 and `split_rows` for κ ≥ 2.
@@ -496,7 +519,9 @@ $$
 - Replace the edge's value in the SP and recompute $L$. Log the improvement.
 
 ### 10.4 Ceiling diagnostic
-On small instances only: solve the full relaxation with CVXPY to get $J_{\text{rel}}$. Check $L \le J_{\text{rel}}$ at every logged round.
+On small instances only: solve the full relaxation $P_\delta$ on the CPU to get $J_{\text{rel}}$ (`push_model.py --reference`). Check $L \le J_{\text{rel}}$ at every logged round.
+- The rows are already in conic form, so the data goes straight to the solvers, without CVXPY. Each solver's PSD triangle convention is tested on a problem with a known answer.
+- Clarabel (interior point, accurate) forms a dense KKT block per PSD cone, so it fits small blocks only: κ = 1 and run B. Above `reference.clarabel_max_block` (32), SCS (first order, lower accuracy) takes over. A κ = 2 value therefore comes with its residuals, may stop at the time limit, and is reported but not used as a ceiling unless it converged.
 
 ### 10.5 Stopping test on P_δ (the η stop)
 - **P_δ** is the fractional relaxation of proposal §2: the declared outer sets, flow conserved, states conserved up to δ. Every $L$ of §10.1–10.3 satisfies $L \le J_{P_\delta} \le J^\star$.
@@ -830,8 +855,8 @@ A run directory (final state, or a chosen snapshot), plus `--methods all|<list>`
   - `--mode throughput`: several jobs per GPU. Use it for count-based metrics, extraction and debugging.
   - Every table states which mode produced it.
 - **Stages (§1).**
-  - Tuning first: short, count-scored jobs in throughput mode. For stage 1 that is 10 configurations × 6 grid values.
-  - Stage 1: 8 jobs in timing mode, on 8 GPUs. GPU 0 runs A then A-lowrank, and GPU 7 runs the two small baselines, each one after the other.
+  - Tuning first: short, count-scored jobs in throughput mode. For stage 1 that is 8 configurations × 6 grid values.
+  - Stage 1: 8 jobs in timing mode, one per GPU.
   - Stage 2: 21 jobs in 3 waves.
   - Stage 3: chosen later.
   - Each job ends at the η stop. The 30-minute time cap is a safety stop, not the expected runtime.
@@ -893,6 +918,7 @@ relaxation:
   couple_second_moments: true
   rlt: false
   ball: true                # redundant ball row of tex 3.3 at kappa >= 2 (5.1.2)
+  eliminate_linear: true    # substitute linear equalities before lifting (5.1.7)
   regions: {theta_splits: 1, lambda_splits: 1}
   taylor_mode: band         # band | mccormick   (B only)
   cost_model: tangent_planes  # tangent_planes | soc (B only)
@@ -966,14 +992,13 @@ render: {fps: 10, filmstrip_cols: 8}
 output: {root: runs}
 ```
 
-`configs/base.yaml` is the authoritative copy. It also holds the tasks (§4.7), the pusher's start, mode subsets (`trellis.faces`, `trellis.regions`), the CPU workers for build-time work (`build`), the build-time pruning tolerances (`pruning`), the tiny self-test instance (`selftest`) and the benchmark sizes (`bench`).
+`configs/base.yaml` is the authoritative copy. It also holds the tasks (§4.7), the pusher's start, mode subsets (`trellis.faces`, `trellis.regions`), the CPU workers for build-time work (`build`), the CPU reference solve (`reference`), the build-time pruning tolerances (`pruning`), the tiny self-test instance (`selftest`) and the benchmark sizes (`bench`).
 
 **Per-run overrides** (`configs/runs/*.yaml`):
 - A: none.
 - A-lowrank: `solver.psd_proj: lowrank`.
 - A-κ2: `relaxation.order: 2`.
-- A-κ3: `relaxation.order: 3`, `trellis.N: 8`, `exclusive: true`. Moment matrix 816×816 per edge. If a round takes more than about 5 s after the `eigh` benchmark, also set `trellis.faces: [0, 2]` (the selftest's reduced mode set) and log that.
-- A-small, A-κ2-small (stage-1 baselines for A-κ3): `trellis.N: 8`, task T2, `relaxation.order: 1` or `2`. Use the same mode set as A-κ3.
+- A-κ3: `relaxation.order: 3`, `exclusive: true`, at the full horizon. Removed, not shrunk, if M3 shows it is too slow (§1).
 - A-reg: `relaxation.regions.theta_splits: 8`, `exclusive: true` (tree blocks of width 4,480).
 - B: `relaxation.type: taylor`, `regions.theta_splits: 8`, `skipping.face_cache: true`.
 - C-a-r{4,16,64}: `tree.type: lowrank_a`, `tree.rank: r`.
@@ -981,9 +1006,10 @@ output: {root: runs}
 - C-b-r16-p4: as C-b-r16, plus `tree.probe_solves_per_refresh: 4`.
 - D: `tree.type: none`.
 - A-noskip (M5 check only, not a matrix job): `skipping.zero_test: false`, `skipping.compaction: none`.
+- ref_tiny_k2 (optional CPU reference solve, not a matrix job): `relaxation.order: 2` on the tiny mode set at N = 8, task T3.
 
 **Matrix** (`matrix.yaml`):
-- `stage1`: the 8 jobs of §1, with their tuning jobs first (`small_kappa_baselines: true`);
+- `stage1`: the 8 jobs of §1, with their tuning jobs first;
 - `stage2`: T1, T2 and T4 for the seven full-size configurations;
 - `stage3`: filled in after stages 1–2;
 - `sweep_N`: off.
@@ -997,8 +1023,8 @@ Seed 0 only.
 | # | Milestone | Acceptance checks (all automated in `--selftest` or in a dedicated `--check_<name>` mode) |
 |---|---|---|
 | M0 | Model and graph | Sign conventions unit-tested. Mode graph matches §4.4. Pruning removes only infeasible or unreachable edges. A hand-scripted feasible push (forward-simulated with the true model) is a valid start→goal path; record its cost $J_{\text{hand}}$. Benchmarks recorded: batched `eigh` sizes (§8.2), per-round time vs E, kernels and syncs per round (§15.5). Ahead-of-time compile covers every variant; a timing-mode dry run reports zero late compiles. *(The per-round measurements and the dry run need the PDHG round, so they are recorded at M3; M0 records the `eigh` benchmark.)* **Batching (§0):** every round primitive is timed at two batch sizes against its roofline, with a verdict. `--bench_psd` covers the PSD projection per round at orders 1–3: exact `eigh` against the low-rank tracker, with accuracy checked against an exact projection. `--bench_linalg` covers Cholesky and triangular solves at the IPM and tree sizes, the merge `eigh` and orthonormalization of the low-rank tree, and the coupling scatter/gather. Every primitive a milestone uses must be judged batched before that milestone starts. |
-| M1 | Outer models | §5.4 validity: 0 violations over $10^4$ samples per edge type (SDP κ = 1, 2; A-reg; Taylor with bands, McCormick and SOC costs), and $200$ per edge type at κ = 3. Negative controls flag broken samples, and lifted rows reproduce their polynomials at random points. Coupled coordinates agree and costs sum to $J_{\text{hand}}$ along the hand push. Every true step has an allowed region copy. Band report and sizing table printed, and the per-group size table of §5.1.7 printed. |
-| M2 | Reference solve | CVXPY + Clarabel (or MOSEK) solves the full relaxation on the small instance and gives $J_{\text{rel}}$. $J_{\text{rel}} \le J_{\text{hand}}$. |
+| M1 | Outer models | §5.4 validity: 0 violations over $10^4$ samples per edge type (SDP κ = 1, 2; A-reg; Taylor with bands, McCormick and SOC costs), and $200$ per edge type at κ = 3. Negative controls flag broken samples, and lifted rows reproduce their polynomials at random points. Coupled coordinates agree and costs sum to $J_{\text{hand}}$ along the hand push. Every true step has an allowed region copy. Linear elimination (§5.1.7) leaves the model unchanged, checked algebraically at κ = 1 and on sampled types at κ = 2: same cost, coupling, equalities, PSD blocks and box, and at κ = 1 the same dimension with every full inequality implied. Band report and sizing table printed, and the per-group size table of §5.1.7 printed. |
+| M2 | Reference solve | Clarabel solves the full relaxation $P_\delta$ on the small instance and gives $J_{\text{rel}}$ (§10.4), for SDP κ = 1 in both forms and for B with bands and with McCormick, on T1 and T3. $J_{\text{rel}} \le J_{\text{hand}}$ on T1. The reduced and full forms agree. The assembled program holds the hand push at cost $J_{\text{hand}}$, and dropping a step is flagged. Each solver's PSD convention passes a known-answer test. SDP κ = 2 runs through SCS on a shorter horizon; its value is checked only if it converges. |
 | M3 | PDHG, run D | On the small instance, the objective reaches within 1e-4 relative of $J_{\text{rel}}$. Every logged $L$ is ≤ $J_{\text{rel}}$ (+ eps). Restarts fire and reduce the KKT error. Stopping test (§10.5): when it fires, $L_{\text{best}} \le J_{\text{rel}} \le U_{\text{flow}}$ within tolerance and the gap is ≤ η. |
 | M4 | Edge identities | §9.1 tests pass (LB equals the pricing value at optimal duals; random duals give a valid bound; "zero ⇔ π ≥ 0" on 1,000 edges). Face cache output matches the IPM to 1e-10. The free bound with projected PSD duals never exceeds Clarabel's $\pi_e$ on 1,000 random edges and prices. |
 | M5 | Skipping | A vs A-noskip on the small instance: iterates agree to 1e-9 at every logged round (tolerance is the IPM's, not exact). Counts are logged. Bucketed compaction gives the same iterates as `compaction: none`. The frozen-edge PSD skip (§9.1) gives the same iterates as running every projection. |
@@ -1019,7 +1045,7 @@ Seed 0 only.
 - **The interval moment box must contain the true points.** It is also what keeps the zero test and the free certificate sound.
 - **Never trust solver objective values for $L$.** Always use duals in the LB formula, projected onto cones, with signed slack.
 - **Recompilation:** keep shapes static. Use buckets, not dynamic shapes. Cache compiled functions by bucket size. Compile ahead of time and fail on late compiles in timing mode (§7.5).
-- **Memory:** κ = 2 has about 3.9k moments per edge. Store per-type matrices, not per-edge copies. Edge vectors are only $E \times 3.9\text{k}$ floats.
+- **Memory:** κ = 2 has at most 1,820 moments per edge after elimination. Store per-type matrices, not per-edge copies.
 - **The face cache must never return an unverified solution.** If verification fails, solve.
 - **Euler rotation update vs unit norm:** use the relative-rotation form (§4.5.2).
 - **The reference model must never enter $L$** (C-b).
@@ -1042,6 +1068,7 @@ Seed 0 only.
 8. **Newton-on-face** for conic edges (proposal §4) is not implemented. It would apply only to run B with `cost_model: soc`, where the cache is off.
 9. **Option (a) base.** A block-diagonal base minus the exact response is indefinite, so option (a) uses a spectral base (tail level times identity) plus the top-r part (§11.4).
 10. **Stopping rule.** The text of proposal §8 applies η to a real trajectory's U. This phase applies η to P_δ, with $U_{\text{flow}}$ from the current flow (§10.5), consistent with §9's round bracket. The trajectory gap $U_{\text{traj}} - L$ is reported once LEAP exists.
+11. **Split PSD blocks and strict feasibility.** The tex's saddle-point result (Lemma 4.1) covers an edge's whole set. The split of item 0 adds PSD duals, whose attainment needs a point with $\mathcal B(m) \succ 0$. Without linear elimination (§5.1.7) no such point exists, because the linear equalities force every moment matrix to be singular. Elimination should restore it at κ = 1, not yet verified. At κ ≥ 2 the quadratic equalities still leave null directions, so the PSD duals may drift there; watch the dual norms at M3.
 
 ---
 

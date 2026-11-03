@@ -30,7 +30,7 @@ trellis:
   dt: 0.1
   contact_types: [stick, slide_pos, slide_neg]
   noncontact_regions: 8
-  faces: [0, 1, 2, 3]            # subsets give the reduced instances (plan 12.3; A-k3 fallback)
+  faces: [0, 1, 2, 3]            # subsets give the reduced instances (plan 12.3)
   regions: all                   # all, or a list of strip_j / corner_j names
 
 costs: {w_p: 1.0, w_theta: 0.5, w_r: 1.0, w_f: 0.01, w_switch: 0.05}
@@ -41,6 +41,7 @@ relaxation:
   couple_second_moments: true
   rlt: false
   ball: true                     # redundant ball row of tex 3.3 at kappa >= 2 (the interval rows imply it at kappa 1)
+  eliminate_linear: true         # substitute linear equalities before lifting (5.1.7): the same set, far smaller; false keeps the full form
   regions: {theta_splits: 1, lambda_splits: 1}
   taylor_mode: band              # band | mccormick   (B only)
   cost_model: tangent_planes     # tangent_planes | soc (B only)
@@ -125,6 +126,15 @@ output: {root: runs}
 # Build-time CPU work (LP pruning, validity checks) runs in this many forked worker processes.
 build: {workers: 16, timeout_s: 3600}
 
+# CPU reference solve of the whole relaxation on small instances, for J_rel (plan 10.4, M2).
+reference:
+  solver: auto                   # auto | clarabel | scs. auto: clarabel if every PSD block fits clarabel_max_block, else scs
+  clarabel_max_block: 32         # Clarabel forms a dense KKT block per PSD cone, so it fits small blocks only
+  time_limit_s: 1800
+  pin_width: 1.0e-6              # an interval bound this narrow becomes an equality: two facing inequalities leave no interior
+  clarabel: {tol: 1.0e-8, max_iter: 200, direct_solve_method: null}   # null keeps Clarabel's default factorization
+  scs: {eps: 1.0e-5, max_iters: 100000000}                            # first order: lower accuracy, stopped by the time limit
+
 # Build-time pruning (plan 6.1): per-edge-type LPs over the linear rows of the true model.
 pruning:
   box_margin: 1.0e-7             # relative outward pad on LP-tightened variable boxes
@@ -137,6 +147,11 @@ selftest:
   faces: [0, 2]
   regions: [strip_0, strip_2, corner_1, corner_2]
   theta_splits: 8                # the region copies M1 checks (A-reg, B)
+  m2:
+    tasks: [T1_push_straight, T3_translate_rotate]         # reference solves on the tiny instance; the first must be selftest.task
+    order2: {task: T1_push_straight, N: 4, time_limit_s: 300}   # SDP order 2 on a shorter horizon, through SCS
+    tol_hand: 1.0e-6             # J_rel may exceed J_hand by this much
+    tol_forms: 1.0e-5            # the reduced and full forms may differ by this much, relative to max(1, |J_rel|)
 
 # M0 benchmarks (plan 8.2 and section 0: every round primitive must truly batch).
 bench:

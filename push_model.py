@@ -1,10 +1,11 @@
-"""Planar pushing on a time-layered trellis (plan sections 4-6): geometry and modes, the true per-edge constraints as one polynomial table, the convex outer models, the true-model step, trellis assembly with pruning, and the milestone self-tests.
+"""Planar pushing on a time-layered trellis (plan sections 4-6): geometry and modes, the true per-edge constraints as one polynomial table, the convex outer models, the true-model step, trellis assembly with pruning, the CPU reference solve, and the milestone self-tests.
 
 Math: docs/trajopt_detailed.tex (source of truth). Implementation: IMPLEMENTATION_PLAN.md.
 
-    python push_model.py --selftest              # milestone checks implemented so far (M0, M1)
-    python push_model.py --run A --build         # build, prune, validate and save one run's edge models
-    python push_model.py --run B --band_report   # the Taylor band widths and the region sizing table
+    python push_model.py --selftest                  # milestone checks implemented so far (M0, M1, M2)
+    python push_model.py --run A --build             # build, prune, validate and save one run's edge models
+    python push_model.py --run B --band_report       # the Taylor band widths and the region sizing table
+    python push_model.py --run A --reference         # the whole relaxation on the CPU, for J_rel
 """
 import argparse
 import collections
@@ -530,44 +531,47 @@ def edge_cost(cfg, tail, head):
 #   lo m[0] <= m <= hi m[0]: interval bounds per unit flow, with 0 <= m[0] <= 1 on top;
 #   psd: blocks B_b(m) >= 0, each a sparse upper-triangular map (row, col, moment index, coefficient);
 #   soc: run B with cost_model soc only, entries z y >= scale (form m)^2;
-#   c: the linear cost; tail_slots, head_slots: entries of m coupled to the tail and head vertices.
+#   c: the linear cost; tail_map, head_map: sparse maps from m to the coordinates coupled at the tail
+#       and head vertices (tex 2.1 allows any linear map that is consistent on true points).
+# An SDP record also holds `free` and `sub`: the variables that survive linear elimination (plan 5.1.7)
+# and every edge variable as a polynomial in them.
 
 # ----- Moment relaxation (plan 5.1) -----
 
 _BASES = {}
 
 
-def moment_basis(kappa):
-    """Monomials of degree <= 2 kappa in the edge variables, ordered by degree then lexicographically, with their index maps (plan 5.1.1). Cached per order.
+def moment_basis(kappa, nv=NV):
+    """Monomials of degree <= 2 kappa in nv variables, ordered by degree then lexicographically, with their index maps (plan 5.1.1). Cached per order and variable count.
 
     monos: the monomials; index: monomial -> position; upto[d]: how many have degree <= d;
     times[i, u]: position of v_i * monomial u (deg u < 2 kappa); mat[a, b]: position of monomial a *
     monomial b (deg a, deg b <= kappa); parent, last: monomial = parent * v_last; exp: exponents.
     """
-    if kappa in _BASES:
-        return _BASES[kappa]
+    if (kappa, nv) in _BASES:
+        return _BASES[(kappa, nv)]
     monos, upto = [()], [1]
     for d in range(1, 2 * kappa + 1):
-        monos += list(itertools.combinations_with_replacement(range(NV), d))
+        monos += list(itertools.combinations_with_replacement(range(nv), d))
         upto.append(len(monos))
     index = {m: i for i, m in enumerate(monos)}
     n, s, low = len(monos), upto[kappa], upto[2 * kappa - 1]
-    times = np.empty((NV, low), np.int32)
+    times = np.empty((nv, low), np.int32)
     for u in range(low):
-        for i in range(NV):
+        for i in range(nv):
             times[i, u] = index[tuple(sorted(monos[u] + (i,)))]
     mat = np.empty((s, s), np.int32)
     for a in range(s):
         for b in range(a, s):
             mat[a, b] = mat[b, a] = index[tuple(sorted(monos[a] + monos[b]))]
-    parent, last, exp = np.zeros(n, np.int32), np.zeros(n, np.int32), np.zeros((n, NV), np.int32)
+    parent, last, exp = np.zeros(n, np.int32), np.zeros(n, np.int32), np.zeros((n, nv), np.int32)
     for i in range(1, n):
         parent[i], last[i] = index[monos[i][:-1]], monos[i][-1]
         exp[i] = exp[parent[i]]
         exp[i, last[i]] += 1
-    basis = dict(kappa=kappa, monos=monos, index=index, upto=upto, times=times, mat=mat, parent=parent, last=last, exp=exp)
+    basis = dict(kappa=kappa, nv=nv, monos=monos, index=index, upto=upto, times=times, mat=mat, parent=parent, last=last, exp=exp)
     basis["moment_map"] = localizing_map(basis, const(1.0), kappa)
-    _BASES[kappa] = basis
+    _BASES[(kappa, nv)] = basis
     return basis
 
 
@@ -579,7 +583,7 @@ def mono_times(basis, k, u):
 
 
 def rank_one_moments(basis, V):
-    """Moment vectors (n, monomials) of the points V (n, NV): every monomial's value at each point."""
+    """Moment vectors (n, monomials) of the points V (n, nv): every monomial's value at each point."""
     M = np.empty((V.shape[0], len(basis["monos"])))
     M[:, 0] = 1.0
     upto = basis["upto"]
@@ -593,7 +597,7 @@ def moment_box(basis, lo, hi):
     """Interval bounds of every monomial over the variable box, per unit flow (plan 5.1.4): interval arithmetic with exact powers, so an even power of a variable that straddles zero starts at zero."""
     exp = basis["exp"]
     mlo, mhi = np.ones(exp.shape[0]), np.ones(exp.shape[0])
-    for i in range(NV):
+    for i in range(basis["nv"]):
         nz = np.flatnonzero(exp[:, i])
         e = exp[nz, i]
         a, b = float(lo[i]) ** e, float(hi[i]) ** e
@@ -605,13 +609,14 @@ def moment_box(basis, lo, hi):
     return mlo, mhi
 
 
-def lift_rows(basis, polys, all_multipliers):
-    """Moment rows L_m(p u) of the polynomials: every monomial u with deg(p u) <= 2 kappa when all_multipliers (equalities, plan 5.1.2), else u = 1 only. Returns (csr matrix, source polynomial per row, multiplier monomial per row)."""
+def lift_rows(basis, polys, all_multipliers, degrees=None):
+    """Moment rows L_m(p u) of the polynomials: every monomial u with deg(p u) <= 2 kappa when all_multipliers (equalities, plan 5.1.2), else u = 1 only. degrees gives each polynomial's degree before substitution, which sets its multipliers. Returns (csr matrix, source polynomial per row, multiplier monomial per row)."""
     n, top = len(basis["monos"]), 2 * basis["kappa"]
     rows, cols, vals, owner, mult = [], [], [], [], []
     base = 0
     for pi, p in enumerate(polys):
-        us = np.arange(basis["upto"][top - poly_degree(p)] if all_multipliers else 1)
+        deg = poly_degree(p) if degrees is None else degrees[pi]
+        us = np.arange(basis["upto"][top - deg] if all_multipliers else 1)
         for k, c in p.items():
             rows.append(base + np.arange(us.size))
             cols.append(mono_times(basis, k, us))
@@ -657,49 +662,171 @@ def localizing_map(basis, p, order):
                 mom=np.concatenate(moms).astype(np.int32), coef=np.concatenate([np.full(iu.size, float(c)) for c in p.values()]))
 
 
-def coupled_slots(basis, knot, second_moments):
-    """Positions in m of a knot's coupled coordinates: flow, first moments, then second moments (plan 5.1.5). The same order at both knots, so a head's slots meet the next tail's."""
-    index = basis["index"]
-    slots = [0] + [index[(i,)] for i in knot]
+def coupling_map(basis, sub, knot, second_moments):
+    """Sparse map from m to a knot's coupled coordinates: flow, first moments, then second moments (plan 5.1.5), each read through the substitution. The same order at both knots, so a head's coordinates meet the next tail's."""
+    polys = [const(1.0)] + [sub[i] for i in knot]
     if second_moments:
-        slots += [index[(a, b)] for pos, a in enumerate(knot) for b in knot[pos:]]
-    return np.array(slots)
+        polys += [poly_mul(sub[a], sub[b]) for pos, a in enumerate(knot) for b in knot[pos:]]
+    return lift_rows(basis, polys, False)[0]
+
+
+# ----- Linear elimination (plan 5.1.7) -----
+# Most equalities of an edge are linear: r_{k+1} = r_k, f_t = mu f_n, zero forces on a non-contact step.
+# Lifted, each one becomes a row per monomial and forces every moment matrix to be singular, so the PSD
+# blocks have no interior. Substituting v = a + Z w first removes those rows and variables instead, and
+# keeps the outer set: with the linear rows in force, a full moment vector is m = T m_w, the moment
+# matrix is W M_w W^T with W of full column rank, and every other row is the image of a reduced row.
+# The elimination happens at build time, and each edge type gets its own smaller m.
+
+def linear_elimination(rows):
+    """Solves a table's linear equalities: (free variables, {variable: polynomial over the free variables' positions}). Each row eliminates its highest remaining variable, so the tail knot and f_n stay free."""
+    a = np.array([[p.get((i,), 0.0) for i in range(NV)] + [p.get((), 0.0)]
+                  for sense, p, _ in rows if sense == "eq" and poly_degree(p) <= 1]).reshape(-1, NV + 1)
+    pivots, rank = {}, 0
+    for col in range(NV - 1, -1, -1):
+        if rank == a.shape[0]:
+            break
+        best = rank + int(np.argmax(np.abs(a[rank:, col])))
+        if abs(a[best, col]) < 1e-12:
+            continue
+        a[[rank, best]] = a[[best, rank]]
+        a[rank] /= a[rank, col]
+        others = a[:, col] != 0.0
+        others[rank] = False
+        a[others] -= a[others, col][:, None] * a[rank]
+        pivots[col] = rank
+        rank += 1
+    if np.max(np.abs(a[rank:, NV]), initial=0.0) > 1e-9:
+        raise ValueError("the linear equalities of this edge type are inconsistent, so it should have been pruned")
+    free = [i for i in range(NV) if i not in pivots]
+    sub = {v: var(j) for j, v in enumerate(free)}
+    for col, r in pivots.items():
+        terms = {(j,): -float(a[r, v]) for j, v in enumerate(free) if abs(a[r, v]) > 1e-14}
+        if abs(a[r, NV]) > 1e-14:
+            terms[()] = -float(a[r, NV])
+        sub[col] = terms
+    return free, sub
+
+
+def poly_substitute(p, sub):
+    """p with every variable replaced by its polynomial in sub; terms that are only rounding are dropped."""
+    out = {}
+    for k, c in p.items():
+        term = {(): c}
+        for i in k:
+            term = poly_mul(term, sub[i])
+        for m, val in term.items():
+            out[m] = out.get(m, 0.0) + val
+    return {m: val for m, val in out.items() if abs(val) > 1e-13}
+
+
+def row_key(p, any_sign):
+    """Hashable form of a row up to scale: any nonzero scale for an equality, positive scale for an inequality."""
+    items = sorted(p.items())
+    lead = items[-1][1]
+    scale = lead if any_sign else abs(lead)
+    return tuple((k, round(c / scale, 10)) for k, c in items)
+
+
+def implied_by_equalities(g, eqs):
+    """Whether an inequality is a multiple of an equality plus a positive constant, e.g. the step bound of a static slider, c^2 + s^2 >= cos(max), given c^2 + s^2 = 1."""
+    top = max(g, key=len)
+    for h, _, _ in eqs:
+        if top in h:
+            rest = poly_add(g, poly_scale(h, -g[top] / h[top]))
+            if not any(k for k, c in rest.items() if abs(c) > 1e-12) and rest.get((), 0.0) > 0.0:
+                return True
+    return False
+
+
+def simplify_rows(eqs, ges, lo, hi, tol=1e-9):
+    """Cleans rows after substitution without changing the outer set (plan 5.1.7): drops rows that became constants, duplicates, and inequalities implied by the equalities. A single-variable inequality is a variable bound: it tightens the box and loses its row, but keeps its localizing block at kappa >= 2. Rows are (poly, tag, degree before substitution); returns (eqs, ges with an is-bound flag, lo, hi)."""
+    lo, hi = lo.copy(), hi.copy()
+    constant = lambda p: not any(k for k in p)
+    out_eq, seen = [], set()
+    for p, tag, deg in eqs:
+        if constant(p):
+            if abs(p.get((), 0.0)) > tol:
+                raise ValueError(f"equality {tag} reduces to the nonzero constant {p[()]}, so this edge type holds no true step")
+            continue
+        key = row_key(p, True)
+        if key not in seen:
+            seen.add(key)
+            out_eq.append((p, tag, deg))
+    out_ge, seen = [], set()
+    for p, tag, deg in ges:
+        if constant(p):
+            if p.get((), 0.0) < -tol:
+                raise ValueError(f"inequality {tag} reduces to the negative constant {p[()]}, so this edge type holds no true step")
+            continue
+        if implied_by_equalities(p, out_eq):
+            continue
+        key = row_key(p, False)
+        if key in seen:
+            continue
+        seen.add(key)
+        terms = [k for k in p if k]
+        is_bound = len(terms) == 1 and len(terms[0]) == 1
+        if is_bound:
+            j, b = terms[0][0], p[terms[0]]
+            edge = -p.get((), 0.0) / b
+            if b > 0.0:
+                lo[j] = max(lo[j], edge)
+            else:
+                hi[j] = min(hi[j], edge)
+        out_ge.append((p, tag, deg, is_bound))
+    crossed = lo > hi                           # only by the LP boxes' outward pad
+    lo[crossed] = hi[crossed] = 0.5 * (lo[crossed] + hi[crossed])
+    return out_eq, out_ge, lo, hi
 
 
 def relax_sdp(cfg, md, task, kind, tail, head, lo, hi):
     """Order-kappa moment relaxation of one edge type (plan 5.1, tex Def 3.4), in the record described at the top of this section."""
     rx = cfg["relaxation"]
     kappa = int(rx["order"])
-    basis = moment_basis(kappa)
+    eliminate = bool(rx["eliminate_linear"])
     rows = edge_constraints(md, task, kind, tail, head)
-    eq_polys, eq_tags = [p for s, p, _ in rows if s == "eq"], [t for s, _, t in rows if s == "eq"]
-    ge_polys, ge_tags = [p for s, p, _ in rows if s == "ge"], [t for s, _, t in rows if s == "ge"]
+    free, sub = linear_elimination(rows) if eliminate else (list(range(NV)), {i: var(i) for i in range(NV)})
+    basis = moment_basis(kappa, len(free))
+    eqs, ges = [], []
+    for sense, p, tag in rows:
+        deg = poly_degree(p)
+        if sense == "ge":
+            ges.append((poly_substitute(p, sub), tag, deg))
+        elif not (eliminate and deg <= 1):
+            eqs.append((poly_substitute(p, sub), tag, deg))
     if kappa >= 2 and rx["ball"]:
         squares = [poly_mul(var(i), var(i), -1.0) for i in range(NV)]
-        ge_polys.append(poly_add(const(np.sum(np.maximum(lo ** 2, hi ** 2))), *squares))
-        ge_tags.append("ball")
+        ges.append((poly_substitute(poly_add(const(np.sum(np.maximum(lo ** 2, hi ** 2))), *squares), sub), "ball", 2))
+    wlo, whi = lo[free], hi[free]
+    if eliminate:
+        eqs, ges, wlo, whi = simplify_rows(eqs, ges, wlo, whi)
+    else:
+        ges = [(p, tag, deg, False) for p, tag, deg in ges]
     psd = [dict(basis["moment_map"], poly=const(1.0), tag="moment")]
-    for p, tag in zip(ge_polys, ge_tags):
-        order = kappa - math.ceil(poly_degree(p) / 2)
+    for p, tag, deg, _ in ges:
+        order = kappa - math.ceil(deg / 2)
         if order >= 1:
             psd.append(dict(localizing_map(basis, p, order), poly=p, tag=tag))
+    ge_rows = [(p, tag) for p, tag, _, is_bound in ges if not is_bound]
     if rx["rlt"]:
-        linear = [(p, t) for p, t in zip(ge_polys, ge_tags) if poly_degree(p) == 1]
+        linear = [(p, tag) for p, tag, deg, _ in ges if deg == 1]
         for pos, (p, ta) in enumerate(linear):
             for q, tb in linear[pos:]:
-                ge_polys.append(poly_mul(p, q))
-                ge_tags.append(f"rlt_{ta}_{tb}")
-    raw, owner, _ = lift_rows(basis, eq_polys, True)
+                ge_rows.append((poly_mul(p, q), f"rlt_{ta}_{tb}"))
+    raw, owner, _ = lift_rows(basis, [e[0] for e in eqs], True, [e[2] for e in eqs])
     keep = independent_rows(raw) if kappa == 1 else unique_rows(raw)
-    mlo, mhi = moment_box(basis, lo, hi)
+    mlo, mhi = moment_box(basis, wlo, whi)
     n = len(basis["monos"])
     c = np.zeros(n)
-    for k, w in edge_cost(cfg, tail, head).items():
+    for k, w in poly_substitute(edge_cost(cfg, tail, head), sub).items():
         c[basis["index"][k]] += w
     second = bool(rx["couple_second_moments"])
-    return dict(kind="sdp", kappa=kappa, n=n, Aeq=raw[keep], eq_owner=owner[keep], eq_tags=eq_tags, eq_rows_raw=raw.shape[0],
-                G=lift_rows(basis, ge_polys, False)[0], ge_tags=ge_tags, ge_polys=ge_polys, lo=mlo, hi=mhi, c=c, psd=psd, soc=[], bands={},
-                tail_slots=coupled_slots(basis, KNOT0, second), head_slots=coupled_slots(basis, KNOT1, second))
+    return dict(kind="sdp", kappa=kappa, n=n, free=free, sub=sub, Aeq=raw[keep], eq_owner=owner[keep], eq_tags=[e[1] for e in eqs],
+                eq_polys=[e[0] for e in eqs], eq_degrees=[e[2] for e in eqs], eq_rows_raw=raw.shape[0],
+                G=lift_rows(basis, [r[0] for r in ge_rows], False)[0], ge_tags=[r[1] for r in ge_rows], ge_polys=[r[0] for r in ge_rows],
+                lo=mlo, hi=mhi, c=c, psd=psd, soc=[], bands={},
+                tail_map=coupling_map(basis, sub, KNOT0, second), head_map=coupling_map(basis, sub, KNOT1, second))
 
 
 # ----- Taylor model with certified bands (plan 5.2, tex Prop 3.1) -----
@@ -929,11 +1056,11 @@ def relax_taylor(cfg, md, task, kind, tail, head, lo, hi):
     for name, z in TZ.items():
         mlo[z + 1], mhi[z + 1] = 0.0, ub[name]
         c[z + 1] = weight[name]
-    slots = lambda ids: np.array([0] + [i + 1 for i in ids])
+    coupling = lambda ids: sp.csr_matrix((np.ones(len(ids) + 1), (np.arange(len(ids) + 1), [0] + [i + 1 for i in ids])), shape=(len(ids) + 1, n))
     return dict(kind="taylor", n=n, Aeq=raw[keep], eq_owner=keep, eq_tags=[t for _, t in eq], eq_rows_raw=raw.shape[0],
                 G=taylor_matrix([p for p, _ in ge]), ge_tags=[t for _, t in ge], ge_polys=[p for p, _ in ge], lo=mlo, hi=mhi, c=c, psd=[],
                 soc=[dict(s, form=taylor_matrix([s["form"]])) for s in soc], bands=bands,
-                tail_slots=slots((TPX0, TPY0, TTH0, TRX0, TRY0)), head_slots=slots((TPX1, TPY1, TTH1, TRX1, TRY1)))
+                tail_map=coupling((TPX0, TPY0, TTH0, TRX0, TRY0)), head_map=coupling((TPX1, TPY1, TTH1, TRX1, TRY1)))
 
 
 def taylor_points(md, task, kind, tail, head, V):
@@ -1015,8 +1142,32 @@ def relax_edge_type(cfg, md, task, modes, tr, ti):
 def lift_points(rel, md, task, kind, tail, head, V):
     """Lifted vectors m (n, rel['n']) at y = 1 of edge-layout points V (n, NV)."""
     if rel["kind"] == "sdp":
-        return rank_one_moments(moment_basis(rel["kappa"]), V)
+        return rank_one_moments(moment_basis(rel["kappa"], len(rel["free"])), V[:, rel["free"]])
     return taylor_points(md, task, kind, tail, head, V)
+
+
+def full_points(rel, W):
+    """Edge-layout points (n, NV) of an SDP record's free-variable points W (n, nv), through its substitution."""
+    return np.column_stack([poly_eval_batch(rel["sub"][i], W) for i in range(NV)])
+
+
+def affine_error(rel, V):
+    """How far points V are from an SDP record's affine set: the largest violation of the linear equalities it eliminated (0 for a record without a substitution)."""
+    if "sub" not in rel:
+        return 0.0
+    return float(np.max(np.abs(full_points(rel, V[:, rel["free"]]) - V)))
+
+
+def prebuild_bases(cfg, md, modes, task, tr):
+    """Builds an SDP instance's moment bases once, before any fork."""
+    if cfg["relaxation"]["type"] != "sdp":
+        return
+    kappa = int(cfg["relaxation"]["order"])
+    counts = {NV}
+    if cfg["relaxation"]["eliminate_linear"]:
+        counts = {len(linear_elimination(type_rows(md, task, modes, tr, ti))[0]) for ti in np.flatnonzero(tr["type_alive"])}
+    for nv in counts:
+        moment_basis(kappa, nv)
 
 
 # ===== TRUE MODEL =====
@@ -1314,11 +1465,11 @@ def psd_violation(block, op, M, V, eig_count):
 def coupling_error(rel, M, V):
     """Largest difference between the coupled coordinates read from lifted points and the same coordinates computed from the point itself (tex 2.1, consistency)."""
     worst = 0.0
-    for slots, knot in ((rel["tail_slots"], KNOT0), (rel["head_slots"], KNOT1)):
-        got, x = M[:, slots], V[:, list(knot)]
+    for mapping, knot in ((rel["tail_map"], KNOT0), (rel["head_map"], KNOT1)):
+        got, x = (mapping @ M.T).T, V[:, list(knot)]
         if rel["kind"] == "sdp":
             want = [np.ones(x.shape[0])] + [x[:, a] for a in range(6)]
-            if slots.size > 7:
+            if got.shape[1] > 7:
                 want += [x[:, a] * x[:, b] for a in range(6) for b in range(a, 6)]
             worst = max(worst, float(np.max(np.abs(got - np.column_stack(want)))))
         else:                                   # flow, p, theta, r: theta through (c, s), since V has no chart
@@ -1354,13 +1505,15 @@ def validate_type(cfg, md, task, modes, tr, ti, samples):
         M = lift_points(rel, md, task, kind, tail, head, v)
         for key, (value, where) in relaxation_violations(rel, M).items():
             note(key, value, where)
+        note("affine", affine_error(rel, v))
         note("cost", np.max(np.abs(M @ rel["c"] - poly_eval_batch(cost, v))))
         note("coupling", coupling_error(rel, M, v))
+        w = v[:, rel["free"]] if rel["kind"] == "sdp" else v
         for block, op in zip(rel["psd"], ops):
             size = int(block["size"])
             few = int(vc["eig_samples"]) if size <= 200 else int(vc["eig_samples_large"])
             count = v.shape[0] if size <= 32 else (min(few, v.shape[0]) if start == 0 else 0)
-            bound, deficit = psd_violation(block, op, M, v, count)
+            bound, deficit = psd_violation(block, op, M, w, count)
             note("psd_bound", bound, block["tag"])
             note("psd_eig", deficit, block["tag"])
     return out
@@ -1374,8 +1527,7 @@ def validity_samples(cfg):
 
 def validate_relaxation(cfg, md, modes, task, tr, kinds=None):
     """Runs validate_type on the alive edge types of one instance (optionally only some kinds), in forked workers."""
-    if cfg["relaxation"]["type"] == "sdp":
-        moment_basis(int(cfg["relaxation"]["order"]))           # built once, before the fork
+    prebuild_bases(cfg, md, modes, task, tr)
     use = tr["type_alive"].copy()
     if kinds is not None:
         use &= np.isin(tr["type_kind"], [EDGE_KINDS.index(k) for k in kinds])
@@ -1632,23 +1784,25 @@ def relaxation_stats(cfg, md, task, modes, tr, ti):
     rel = relax_edge_type(cfg, md, task, modes, tr, ti)
     tail, head = type_modes(tr, modes, ti)
     sizes = collections.Counter(int(b["size"]) for b in rel["psd"])
-    return dict(group=type_group(EDGE_KINDS[int(tr["type_kind"][ti])], tail, head), n=rel["n"], free=int(np.sum(rel["lo"] < rel["hi"])),
+    return dict(group=type_group(EDGE_KINDS[int(tr["type_kind"][ti])], tail, head), n=rel["n"], nv=len(rel.get("free", range(rel["n"] - 1))), free=int(np.sum(rel["lo"] < rel["hi"])),
                 eq_raw=rel["eq_rows_raw"], eq=rel["Aeq"].shape[0], ge=rel["G"].shape[0], rows=rel["Aeq"].shape[0] + rel["G"].shape[0],
                 nnz=int(rel["Aeq"].nnz + rel["G"].nnz), blocks=" + ".join(f"{c} x {s}" for s, c in sorted(sizes.items(), reverse=True)) or "none")
 
 
 def relaxation_table(cfg, md, modes, task, tr, label):
-    """Prints the sizes the solver will see, per group of edge types (plan 5.1.7). `open` counts entries of m not pinned by their box, `eq` the equality rows kept, and eq+ge is the size of the IPM's row-form system (plan 8.1)."""
+    """Prints the sizes the solver will see, per group of edge types (plan 5.1.7). `vars` counts the variables left after elimination, `m` the entries of m, `open` those not pinned by their box, `eq` the equality rows kept, and eq+ge is the size of the IPM's row-form system (plan 8.1)."""
+    prebuild_bases(cfg, md, modes, task, tr)
     stats = pool_map(lambda ti: relaxation_stats(cfg, md, task, modes, tr, int(ti)), np.flatnonzero(tr["type_alive"]), cfg["build"])
     groups = {}
     for s in stats:
         groups.setdefault(s["group"], []).append(s)
-    print(f"\n{label}: {len(stats)} alive edge types, {stats[0]['n']} entries of m", flush=True)
+    print(f"\n{label}: {len(stats)} alive edge types", flush=True)
     for name, rs in sorted(groups.items()):
         span = lambda key: f"{min(r[key] for r in rs)}-{max(r[key] for r in rs)}"
-        print(f"  {name:24s} types {len(rs):5d}  open {span('free'):>13s}  eq raw {span('eq_raw'):>13s}  eq {span('eq'):>13s}  ge {span('ge'):>9s}  "
+        print(f"  {name:24s} types {len(rs):5d}  vars {span('nv'):>6s}  m {span('n'):>13s}  open {span('free'):>13s}  eq raw {span('eq_raw'):>13s}  eq {span('eq'):>13s}  ge {span('ge'):>9s}  "
               f"eq+ge {span('rows'):>13s}  nnz {span('nnz'):>15s}  psd {sorted({r['blocks'] for r in rs})}", flush=True)
-    return {name: {k: [min(r[k] for r in rs), max(r[k] for r in rs)] for k in ("free", "eq_raw", "eq", "ge", "rows", "nnz")} for name, rs in groups.items()}
+    keys = ("nv", "n", "free", "eq_raw", "eq", "ge", "rows", "nnz")
+    return {name: {k: [min(r[k] for r in rs), max(r[k] for r in rs)] for k in keys} for name, rs in groups.items()}
 
 
 def summary(tr, modes, task):
@@ -1665,22 +1819,41 @@ def summary(tr, modes, task):
 
 
 def pack_relaxations(rels):
-    """Per-type outer models as flat arrays for problem.npz (plan 6.1, 6.2): rows as (type, row, col, value), PSD maps as (type, block, row, col, moment, coefficient). Block 0 is the moment matrix, shared by all SDP types and stored once. Per type rather than per edge: memory scales with the types."""
-    first = next(r for r in rels if r is not None)
-    nt, n = len(rels), first["n"]
-    out = dict(rel_kind=first["kind"], rel_n=n, rel_tail_slots=first["tail_slots"], rel_head_slots=first["head_slots"],
-               rel_lo=np.zeros((nt, n)), rel_hi=np.zeros((nt, n)), rel_c=np.zeros((nt, n)),
+    """Per-type outer models as flat arrays for problem.npz (plan 6.1, 6.2): rows and coupling maps as (type, row, col, value), PSD maps as (type, block, row, col, moment, coefficient), vectors padded to the longest m with rel_n[type] entries in use. Block 0 is the moment matrix, which depends only on a type's variable count, so it is stored once per count as rel_moment_<count>_*. Per type rather than per edge: memory scales with the types."""
+    alive = [r for r in rels if r is not None]
+    first = alive[0]
+    nt, longest = len(rels), max(r["n"] for r in alive)
+    is_sdp = first["kind"] == "sdp"
+    out = dict(rel_kind=first["kind"], rel_q=first["tail_map"].shape[0], rel_n=np.zeros(nt, np.int64),
+               rel_lo=np.zeros((nt, longest)), rel_hi=np.zeros((nt, longest)), rel_c=np.zeros((nt, longest)),
                rel_eq_rows=np.zeros(nt, np.int64), rel_ge_rows=np.zeros(nt, np.int64))
-    coo = dict(eq=[], ge=[])
+    if is_sdp:
+        out.update(rel_nv=np.zeros(nt, np.int64), rel_free=np.full((nt, NV), -1, np.int64), rel_sub_const=np.zeros((nt, NV)), rel_sub_coef=np.zeros((nt, NV, NV)))
+    coo = dict(eq=[], ge=[], tail=[], head=[])
     psd, psd_sizes, soc = [], [], []
     for ti, rel in enumerate(rels):
         if rel is None:
             continue
-        out["rel_lo"][ti], out["rel_hi"][ti], out["rel_c"][ti] = rel["lo"], rel["hi"], rel["c"]
+        n = rel["n"]
+        out["rel_n"][ti] = n
+        out["rel_lo"][ti, :n], out["rel_hi"][ti, :n], out["rel_c"][ti, :n] = rel["lo"], rel["hi"], rel["c"]
         out["rel_eq_rows"][ti], out["rel_ge_rows"][ti] = rel["Aeq"].shape[0], rel["G"].shape[0]
-        for key, mat in (("eq", rel["Aeq"]), ("ge", rel["G"])):
+        for key, mat in (("eq", rel["Aeq"]), ("ge", rel["G"]), ("tail", rel["tail_map"]), ("head", rel["head_map"])):
             c = mat.tocoo()
             coo[key].append((np.full(c.nnz, ti, np.int32), c.row.astype(np.int32), c.col.astype(np.int32), c.data))
+        if is_sdp:
+            nv = len(rel["free"])
+            out["rel_nv"][ti] = nv
+            out["rel_free"][ti, :nv] = rel["free"]
+            for i in range(NV):
+                for k, value in rel["sub"][i].items():
+                    if k:
+                        out["rel_sub_coef"][ti, i, k[0]] = value
+                    else:
+                        out["rel_sub_const"][ti, i] = value
+            moment = rel["psd"][0]
+            out[f"rel_moment_{nv}_size"], out[f"rel_moment_{nv}_row"] = moment["size"], moment["row"]
+            out[f"rel_moment_{nv}_col"], out[f"rel_moment_{nv}_mom"] = moment["col"], moment["mom"]
         for b, block in enumerate(rel["psd"]):
             if b > 0:
                 psd.append((np.full(block["row"].size, ti, np.int32), np.full(block["row"].size, b, np.int32),
@@ -1690,9 +1863,6 @@ def pack_relaxations(rels):
     for key, parts in coo.items():
         for name, column in zip(("type", "row", "col", "val"), zip(*parts)):
             out[f"rel_{key}_{name}"] = np.concatenate(column)
-    if first["psd"]:
-        out.update(rel_moment_size=first["psd"][0]["size"], rel_moment_row=first["psd"][0]["row"], rel_moment_col=first["psd"][0]["col"],
-                   rel_moment_mom=first["psd"][0]["mom"])
     if psd:
         for name, column in zip(("type", "block", "row", "col", "mom", "coef"), zip(*psd)):
             out[f"rel_psd_{name}"] = np.concatenate(column)
@@ -1720,9 +1890,218 @@ def save_problem(path, cfg, md, modes, task, tr, rels):
            type_status=tr["type_status"].astype("U32"), s=tr["s"], t=tr["t"], N=tr["N"], M=tr["M"])
 
 
+# ===== REFERENCE SOLVE =====
+# Plan 10.4, milestone M2: the whole relaxation P_delta (tex Def 2.2) of a small instance as one conic
+# program, solved on the CPU. Its value J_rel is the ceiling every certified bound must stay under at
+# M3. The data goes to the solvers directly, not through CVXPY: the rows are already in conic form, and
+# this keeps control of the triangle convention, which check_cone_conventions tests on a known answer.
+# Both solvers take: minimize c^T x with s = b - A x, s in (zero cone, nonnegative orthant, PSD cones).
+
+def svec_position(row, col, size, solver):
+    """Position of entry (row, col), row <= col, in the solver's scaled triangle of a symmetric matrix: Clarabel stacks the upper triangle by columns, SCS the lower triangle by columns. Both scale off-diagonals by sqrt(2)."""
+    if solver == "clarabel":
+        return col * (col + 1) // 2 + row
+    return row * size - row * (row - 1) // 2 + col - row
+
+
+def svec_to_matrix(v, size, solver):
+    """The symmetric matrix of a scaled triangle."""
+    iu, ju = np.triu_indices(size)
+    vals = v[svec_position(iu, ju, size, solver)] / np.where(iu == ju, 1.0, math.sqrt(2.0))
+    out = np.zeros((size, size))
+    out[iu, ju] = vals
+    out[ju, iu] = vals
+    return out
+
+
+def type_conic_rows(rel, solver, pin_width):
+    """One edge type's rows over its own m: equalities (zero), nonnegative rows (nonneg) and the PSD blocks' scaled triangles (psd, with their sizes). An interval bound of at most pin_width becomes an equality, because two facing inequalities leave an interior-point solver no interior."""
+    if rel["soc"]:
+        raise NotImplementedError("the reference solve has no second-order rows; use cost_model tangent_planes")
+    n, lo, hi = rel["n"], rel["lo"], rel["hi"]
+    entries = np.arange(1, n)
+    tight = hi[1:] - lo[1:] <= pin_width
+    pinned, spread = entries[tight], entries[~tight]
+
+    def bound_rows(j, a, b):
+        k = np.arange(j.size)
+        rows = sp.csr_matrix((np.r_[np.full(j.size, a), b], (np.r_[k, k], np.r_[j, np.zeros(j.size, np.int64)])), shape=(j.size, n))
+        rows.eliminate_zeros()
+        return rows
+
+    zero = sp.vstack([rel["Aeq"], bound_rows(pinned, 1.0, -0.5 * (lo[pinned] + hi[pinned]))], format="csr")
+    zero = zero[independent_rows(zero) if n <= 200 else unique_rows(zero)]
+    flow = sp.csr_matrix(([1.0], ([0], [0])), shape=(1, n))
+    nonneg = sp.vstack([rel["G"], bound_rows(spread, 1.0, -lo[spread]), bound_rows(spread, -1.0, hi[spread]), flow], format="csr")
+    rows, cols, vals, sizes, base = [], [], [], [], 0
+    for block in rel["psd"]:
+        size = int(block["size"])
+        r, c = block["row"].astype(np.int64), block["col"].astype(np.int64)
+        rows.append(base + svec_position(r, c, size, solver))
+        cols.append(block["mom"])
+        vals.append(block["coef"] * np.where(r == c, 1.0, math.sqrt(2.0)))
+        sizes.append(size)
+        base += size * (size + 1) // 2
+    psd = sp.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(base, n)) if rows else sp.csr_matrix((0, n))
+    return dict(zero=zero.tocoo(), nonneg=nonneg.tocoo(), psd=psd.tocoo(), sizes=sizes)
+
+
+def assemble_conic(cfg, tr, rels, solver):
+    """P_delta of an instance as one conic program over the stacked m of its alive edges: each edge's rows, flow conservation (exact, with beta_s = -1, beta_t = +1, head +, tail -) and the state rows |K m| <= delta at inner vertices. The goal's flow row is left out, since the others imply it."""
+    delta = float(cfg["solver"]["delta"])
+    alive = np.flatnonzero(tr["edge_alive"])
+    if not alive.size:
+        raise ValueError("no start->goal path survives pruning")
+    types = tr["edge_type"][alive]
+    rows_of = {int(ti): type_conic_rows(rels[ti], solver, float(cfg["reference"]["pin_width"])) for ti in np.unique(types)}
+    offs = np.concatenate([[0], np.cumsum([rels[ti]["n"] for ti in types])]).astype(np.int64)
+    nx = int(offs[-1])
+
+    def stacked(key):
+        rows, cols, vals, count = [], [], [], 0
+        for off, ti in zip(offs, types):
+            coo = rows_of[int(ti)][key]
+            rows.append(coo.row.astype(np.int64) + count)
+            cols.append(coo.col.astype(np.int64) + off)
+            vals.append(coo.data)
+            count += coo.shape[0]
+        return sp.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(count, nx))
+
+    c = np.zeros(nx)
+    q = rels[types[0]]["tail_map"].shape[0]
+    verts = np.unique(np.r_[tr["edge_tail"][alive], tr["edge_head"][alive]])
+    vpos = np.full(tr["nv"], -1, np.int64)
+    vpos[verts] = np.arange(verts.size)
+    krows, kcols, kvals = [], [], []
+    for off, e, ti in zip(offs, alive, types):
+        rel = rels[ti]
+        c[off:off + rel["n"]] = rel["c"]
+        for mapping, vertex, sign in ((rel["head_map"], tr["edge_head"][e], 1.0), (rel["tail_map"], tr["edge_tail"][e], -1.0)):
+            coo = mapping.tocoo()
+            krows.append(vpos[vertex] * q + coo.row.astype(np.int64))
+            kcols.append(off + coo.col.astype(np.int64))
+            kvals.append(sign * coo.data)
+    K = sp.csr_matrix((np.concatenate(kvals), (np.concatenate(krows), np.concatenate(kcols))), shape=(verts.size * q, nx))
+    v_s, v_t = int(vpos[tr["s"]]), int(vpos[tr["t"]])
+    flow = np.array([i * q for i in range(verts.size) if i != v_t], np.int64)
+    inner = np.array([i for i in range(verts.size) if i not in (v_s, v_t)], np.int64)
+    state = (inner[:, None] * q + np.arange(1, q)).ravel()
+    edge_zero, edge_nonneg, edge_psd = stacked("zero"), stacked("nonneg"), stacked("psd")
+    beta = np.where(flow == v_s * q, -1.0, 0.0)
+    if delta > 0.0:
+        zero = sp.vstack([edge_zero, K[flow]], format="csr")
+        b_zero = np.r_[np.zeros(edge_zero.shape[0]), beta]
+        nonneg = sp.vstack([-edge_nonneg, K[state], -K[state]], format="csr")
+        b_nonneg = np.r_[np.zeros(edge_nonneg.shape[0]), np.full(2 * state.size, delta)]
+    else:
+        zero = sp.vstack([edge_zero, K[flow], K[state]], format="csr")
+        b_zero = np.r_[np.zeros(edge_zero.shape[0]), beta, np.zeros(state.size)]
+        nonneg = -edge_nonneg
+        b_nonneg = np.zeros(edge_nonneg.shape[0])
+    A = sp.vstack([zero, nonneg, -edge_psd], format="csc")
+    A.eliminate_zeros()
+    A.sort_indices()
+    return dict(solver=solver, A=A, b=np.r_[b_zero, b_nonneg, np.zeros(edge_psd.shape[0])], c=c, nz=zero.shape[0], nl=nonneg.shape[0],
+                sizes=[s for ti in types for s in rows_of[int(ti)]["sizes"]], alive=alive, offs=offs)
+
+
+def conic_residuals(prob, x):
+    """(largest equality error, largest inequality violation, largest PSD deficit) of a point, computed here rather than read from a solver."""
+    s = prob["b"] - prob["A"] @ x
+    nz, nl = prob["nz"], prob["nl"]
+    eq = float(np.max(np.abs(s[:nz]), initial=0.0))
+    ge = max(float(np.max(-s[nz:nz + nl], initial=0.0)), 0.0)
+    psd, base = 0.0, nz + nl
+    for size in prob["sizes"]:
+        k = size * (size + 1) // 2
+        psd = max(psd, -float(np.linalg.eigvalsh(svec_to_matrix(s[base:base + k], size, prob["solver"]))[0]))
+        base += k
+    return eq, ge, psd
+
+
+def solve_conic(cfg, prob):
+    """Solves an assembled program with its solver: a dict with status, solved, infeasible, iters, the dual value, seconds and x."""
+    rc = cfg["reference"]
+    nz, nl, sizes = prob["nz"], prob["nl"], [int(s) for s in prob["sizes"]]
+    t0 = time.perf_counter()
+    if prob["solver"] == "clarabel":
+        import clarabel
+        settings = clarabel.DefaultSettings()
+        settings.verbose = False
+        settings.time_limit = float(rc["time_limit_s"])
+        settings.max_iter = int(rc["clarabel"]["max_iter"])
+        settings.tol_gap_abs = settings.tol_gap_rel = settings.tol_feas = float(rc["clarabel"]["tol"])
+        if rc["clarabel"]["direct_solve_method"]:
+            settings.direct_solve_method = str(rc["clarabel"]["direct_solve_method"])
+        cones = ([clarabel.ZeroConeT(nz)] if nz else []) + ([clarabel.NonnegativeConeT(nl)] if nl else []) + [clarabel.PSDTriangleConeT(s) for s in sizes]
+        n = prob["A"].shape[1]
+        sol = clarabel.DefaultSolver(sp.csc_matrix((n, n)), prob["c"], prob["A"], prob["b"], cones, settings).solve()
+        status = str(sol.status)
+        out = dict(status=status, solved=status in ("Solved", "AlmostSolved"), infeasible=status in ("PrimalInfeasible", "AlmostPrimalInfeasible"),
+                   iters=int(sol.iterations), J_dual=float(getattr(sol, "obj_val_dual", float("nan"))), x=np.asarray(sol.x, float))
+    elif prob["solver"] == "scs":
+        import scs
+        eps = float(rc["scs"]["eps"])
+        sol = scs.SCS(dict(A=prob["A"], b=prob["b"], c=prob["c"]), dict(z=nz, l=nl, s=sizes), verbose=False, eps_abs=eps, eps_rel=eps,
+                      max_iters=int(rc["scs"]["max_iters"]), time_limit_secs=float(rc["time_limit_s"])).solve()
+        info = sol["info"]
+        out = dict(status=str(info["status"]), solved=int(info["status_val"]) == 1, infeasible=int(info["status_val"]) in (-2, -7),
+                   iters=int(info["iter"]), J_dual=float(info["dobj"]), x=np.asarray(sol["x"], float))
+    else:
+        raise ValueError(f"unknown reference solver {prob['solver']!r}")
+    out["seconds"] = time.perf_counter() - t0
+    return out
+
+
+def edge_models(cfg, md, task, modes, tr):
+    """Outer models of the edge types that alive edges use (None for the others)."""
+    used = set(np.unique(tr["edge_type"][tr["edge_alive"]]).tolist())
+    return [relax_edge_type(cfg, md, task, modes, tr, ti) if ti in used else None for ti in range(len(tr["type_kind"]))]
+
+
+def reference_solver(cfg, rels):
+    """Clarabel forms a dense KKT block per PSD cone, so it fits small blocks only: 'auto' sends larger ones to SCS, a first-order solver with lower accuracy."""
+    rc = cfg["reference"]
+    if rc["solver"] != "auto":
+        return rc["solver"]
+    largest = max((int(b["size"]) for r in rels if r is not None for b in r["psd"]), default=0)
+    return "clarabel" if largest <= int(rc["clarabel_max_block"]) else "scs"
+
+
+def reference_line(r):
+    """One printed line of a reference result."""
+    if "error" in r:
+        return f"  {r['label']:44s} ERROR {r['error']}"
+    value = "infeasible" if r["J"] is None else f"{r['J']:.6f}"
+    tail = "" if r["J"] is None else f"  residuals eq {r['eq']:.1e} ge {r['ge']:.1e} psd {r['psd']:.1e}  edges with flow {r['flow_edges']}/{r['edges']}"
+    return (f"  {r['label']:44s} J_rel {value:>10s}  dual {r['J_dual']:9.6f}  {r['solver']:8s} {r['status']:24s} {r['iters']:7d} its {r['seconds']:8.1f} s"
+            f"  x {r['variables']:7d}  rows {r['rows']:7d}  block {r['largest_block']:4d}" + tail)
+
+
+def reference_job(cfg, inst, label):
+    """P_delta of one instance on the CPU (plan 10.4), as a JSON-ready dict. It prints a line when done, since jobs overlap and can take minutes, and it reports an error instead of raising, so that one failure does not hide the other solves."""
+    md, modes, task, tr = inst
+    try:
+        rels = edge_models(cfg, md, task, modes, tr)
+        prob = assemble_conic(cfg, tr, rels, reference_solver(cfg, rels))
+        out = solve_conic(cfg, prob)
+        x = out.pop("x")
+        out.update(label=label, task=task["name"], solver=prob["solver"], variables=int(prob["c"].size), rows=int(prob["A"].shape[0]),
+                   edges=int(prob["alive"].size), largest_block=max(prob["sizes"], default=0), J=None)
+        if not out["infeasible"]:
+            out["eq"], out["ge"], out["psd"] = conic_residuals(prob, x)
+            out["J"] = float(prob["c"] @ x)
+            out["flow_edges"] = int(np.sum(x[prob["offs"][:-1]] > 1e-4))
+    except Exception as exc:
+        out = dict(label=label, task=task["name"], error=f"{type(exc).__name__}: {exc}", solved=False, infeasible=False, J=None)
+    print(reference_line(out), flush=True)
+    return out
+
+
 # ===== SELFTEST =====
 # Milestone checks (plan 17). M0: sign conventions, the mode graph, pruning soundness, and a
-# hand-scripted true push that must be a valid start->goal path.
+# hand-scripted true push that must be a valid start->goal path. M1: the outer models hold every true
+# point, and elimination does not change them. M2: the reference solve.
 
 def flow_residual(tr, y):
     """Inflow - outflow - beta_v at every vertex, for edge flows y (zero when flow is conserved)."""
@@ -2017,6 +2396,11 @@ def check_moment_basis():
         if err > 1e-13:
             return False, f"kappa {kappa}: index tables disagree with monomial values by {err:.1e}"
         lines.append(f"kappa {kappa}: {n} moments, {s} x {s}, tables good to {err:.0e}")
+    # the sizes after linear elimination (plan 5.1.7): 12 variables in contact, 8 on a free-to-free step
+    for (kappa, nv), (n, s) in {(1, 12): (91, 13), (2, 12): (1820, 91), (3, 12): (18564, 455), (1, 8): (45, 9), (2, 8): (495, 45), (3, 8): (3003, 165)}.items():
+        b = moment_basis(kappa, nv)
+        if len(b["monos"]) != n or b["upto"][kappa] != s:
+            return False, f"kappa {kappa}, {nv} variables: {len(b['monos'])} moments and a matrix of size {b['upto'][kappa]}, expected {n} and {s}"
     b = moment_basis(2)
     lo = rng.uniform(-1.0, 0.5, NV)
     hi = lo + rng.uniform(0.0, 1.0, NV)
@@ -2084,44 +2468,140 @@ def check_region_graph(inst, samples=2000):
     return True, f"{expect} transitions per layer at {splits} theta regions; {checked} random true steps all have an allowed pair of copies"
 
 
-def lift_identity_type(cfg, md, task, modes, tr, ti, V, M):
-    """Largest error of one edge type's lifted rows, blocks and cost against their source polynomials at points V, plus (rank of the raw equalities, rows kept)."""
+def lift_identity_type(cfg, md, task, modes, tr, ti):
+    """Largest error of one edge type's substitution, lifted rows, blocks, coupling and cost against their source polynomials at random points of its free variables, plus (rank of the raw equalities, rows kept)."""
     tail, head = type_modes(tr, modes, ti)
-    kind = EDGE_KINDS[int(tr["type_kind"][ti])]
     rel = relax_edge_type(cfg, md, task, modes, tr, ti)
-    basis = moment_basis(rel["kappa"])
-    eqs = [p for s, p, _ in edge_constraints(md, task, kind, tail, head) if s == "eq"]
-    raw, owner, mult = lift_rows(basis, eqs, True)
-    values = np.stack([poly_eval_batch(p, V) for p in eqs])
-    err = float(np.max(np.abs(raw @ M.T - values[owner] * M[:, mult].T)))
-    values = np.stack([poly_eval_batch(p, V) for p in rel["ge_polys"]])
-    err = max(err, float(np.max(np.abs(rel["G"] @ M.T - values))))
-    err = max(err, float(np.max(np.abs(M @ rel["c"] - poly_eval_batch(edge_cost(cfg, tail, head), V)))))
+    basis = moment_basis(rel["kappa"], len(rel["free"]))
+    W = np.random.default_rng(int(ti)).uniform(-1.0, 1.0, (8, len(rel["free"])))
+    M = rank_one_moments(basis, W)
+    V = full_points(rel, W)
+    err = 0.0
+    for _, p, _ in type_rows(md, task, modes, tr, ti):
+        err = max(err, float(np.max(np.abs(poly_eval_batch(poly_substitute(p, rel["sub"]), W) - poly_eval_batch(p, V)))))
+    raw, owner, mult = lift_rows(basis, rel["eq_polys"], True, rel["eq_degrees"])
+    if raw.shape[0]:
+        values = np.stack([poly_eval_batch(p, W) for p in rel["eq_polys"]])
+        err = max(err, float(np.max(np.abs(raw @ M.T - values[owner] * M[:, mult].T))))
+    if rel["G"].shape[0]:
+        values = np.stack([poly_eval_batch(p, W) for p in rel["ge_polys"]])
+        err = max(err, float(np.max(np.abs(rel["G"] @ M.T - values))))
+    err = max(err, float(np.max(np.abs(M @ rel["c"] - poly_eval_batch(edge_cost(cfg, tail, head), V)))), coupling_error(rel, M, V))
     for block in rel["psd"]:
-        err = max(err, float(np.max(block_identity_error(block, block_operator(block, rel["n"]), M, V)[0])))
+        err = max(err, float(np.max(block_identity_error(block, block_operator(block, rel["n"]), M, W)[0])))
     rank = None
     if rel["kappa"] == 1:
-        d = raw.toarray()
-        rank = int(np.linalg.matrix_rank(d / np.linalg.norm(d, axis=1, keepdims=True), tol=1e-10))
+        rank = 0
+        if raw.shape[0]:
+            d = raw.toarray()
+            rank = int(np.linalg.matrix_rank(d / np.linalg.norm(d, axis=1, keepdims=True), tol=1e-10))
     return err, rank, rel["Aeq"].shape[0]
 
 
 def check_lift_identity(cfg, inst, max_types=None):
-    """Negative control for the rows (plan 5.4): at random infeasible points, where no row vanishes, each lifted row, block and cost must equal the polynomial it came from. Rows that are trivially zero would pass the validity check but fail here. At kappa 1, the rows kept must span the raw rows."""
+    """Negative control for the rows (plan 5.4): at random points, where no quadratic row vanishes, each lifted row, block and cost must equal the polynomial it came from. Rows that are trivially zero would pass the validity check but fail here. At kappa 1, the rows kept must span the raw rows."""
     md, modes, task, tr = inst
-    basis = moment_basis(int(cfg["relaxation"]["order"]))
-    V = np.random.default_rng(11).uniform(-1.0, 1.0, (8, NV))
-    M = rank_one_moments(basis, V)
+    prebuild_bases(cfg, md, modes, task, tr)
     alive = np.flatnonzero(tr["type_alive"])
     if max_types:
         alive = alive[np.linspace(0, alive.size - 1, max_types).astype(int)]
-    out = pool_map(lambda ti: lift_identity_type(cfg, md, task, modes, tr, int(ti), V, M), alive, cfg["build"])
+    out = pool_map(lambda ti: lift_identity_type(cfg, md, task, modes, tr, int(ti)), alive, cfg["build"])
     worst = max(r[0] for r in out)
     short = sum(1 for _, rank, kept in out if rank is not None and rank != kept)
     if short:
         return False, f"{short} edge types keep equality rows that do not span the raw ones"
     return worst <= 1e-10, f"{len(out)} edge types: lifted rows, blocks and costs match at random points to {worst:.1e}" + (
         "; the rows kept span the raw rows" if int(cfg["relaxation"]["order"]) == 1 else "")
+
+
+def substitution_map(basis_full, basis, sub):
+    """Sparse T with m_full = T m_reduced: each monomial of the full variables written over the reduced ones. It sends a reduced moment vector to the full one that satisfies every eliminated row (plan 5.1.7)."""
+    rows, cols, vals = [], [], []
+    for a, mono in enumerate(basis_full["monos"]):
+        term = {(): 1.0}
+        for i in mono:
+            term = poly_mul(term, sub[i])
+        for k, c in term.items():
+            rows.append(a)
+            cols.append(basis["index"][k])
+            vals.append(c)
+    return sp.csr_matrix((vals, (rows, cols)), shape=(len(basis_full["monos"]), len(basis["monos"])))
+
+
+def block_matrix(block, m):
+    """A PSD map's symmetric matrix at one vector m."""
+    s = int(block["size"])
+    out = np.zeros((s, s))
+    np.add.at(out, (block["row"], block["col"]), block["coef"] * m[block["mom"]])
+    return out + out.T - np.diag(np.diag(out))
+
+
+def elimination_type(cfg, cfg_full, md, task, modes, tr, ti):
+    """One edge type's reduced model against its full one, read through T (plan 5.1.7). Every value should be about zero, except `implied`, which should not be negative."""
+    rel, full = relax_edge_type(cfg, md, task, modes, tr, ti), relax_edge_type(cfg_full, md, task, modes, tr, ti)
+    basis, basis_full = moment_basis(rel["kappa"], len(rel["free"])), moment_basis(rel["kappa"])
+    T = substitution_map(basis_full, basis, rel["sub"])
+    out = dict(cost=float(np.max(np.abs(T.T @ full["c"] - rel["c"]))))
+    out["coupling"] = max(float(np.max(np.abs((a @ T - b).toarray()))) for a, b in ((full["tail_map"], rel["tail_map"]), (full["head_map"], rel["head_map"])))
+    # every full equality, including the eliminated ones, lies in the span of the reduced ones
+    mapped = (lift_rows(basis_full, [p for s, p, _ in type_rows(md, task, modes, tr, ti) if s == "eq"], True)[0] @ T).toarray()
+    if rel["Aeq"].shape[0]:
+        q, r, _ = scipy.linalg.qr(rel["Aeq"].toarray().T, mode="economic", pivoting=True)
+        diag = np.abs(np.diag(r))
+        q = q[:, :int(np.sum(diag > 1e-10 * diag[0]))]
+        mapped = mapped - (mapped @ q) @ q.T
+    out["eq_span"] = float(np.max(np.abs(mapped), initial=0.0))
+    # B_full(T m) = W B(m) W^T with W of full column rank, at any m, so one block is PSD exactly when the other is
+    m = np.random.default_rng(int(ti)).normal(size=rel["n"])
+    m_full = T @ m
+    blocks = {b["tag"]: b for b in full["psd"]}
+    out["blocks"] = 0.0
+    for block in rel["psd"]:
+        fb = blocks[block["tag"]]
+        W = T[:int(fb["size"]), :int(block["size"])]
+        out["blocks"] = max(out["blocks"], float(np.max(np.abs(block_matrix(fb, m_full) - W @ (W @ block_matrix(block, m)).T))))
+    # the reduced box's image stays in the full box, and the two agree on the monomials they share, up to the LP boxes' pad
+    high, low = T.maximum(0) @ rel["hi"] + T.minimum(0) @ rel["lo"], T.maximum(0) @ rel["lo"] + T.minimum(0) @ rel["hi"]
+    shared = [basis_full["index"][tuple(rel["free"][j] for j in mono)] for mono in basis["monos"]]
+    out["box"] = max(float(np.max(full["lo"] - low)), float(np.max(high - full["hi"])),
+                     float(np.max(np.abs(rel["lo"] - full["lo"][shared]))), float(np.max(np.abs(rel["hi"] - full["hi"][shared]))))
+    if rel["kappa"] == 1:
+        # same dimension (136 - 51 = 91 - 6 on a contact edge), and every full inequality is implied: an LP per row over the reduced rows and box
+        out["dim"] = abs((full["n"] - full["Aeq"].shape[0]) - (rel["n"] - rel["Aeq"].shape[0]))
+        A, G = rel["Aeq"].toarray(), rel["G"].toarray()
+        kw = dict(A_ub=-G[:, 1:] if G.shape[0] else None, b_ub=G[:, 0] if G.shape[0] else None, A_eq=A[:, 1:] if A.shape[0] else None, b_eq=-A[:, 0] if A.shape[0] else None,
+                  bounds=list(zip(rel["lo"][1:], rel["hi"][1:])), method="highs", options=LP_OPTIONS)
+        out["implied"] = float("inf")
+        for g in (full["G"] @ T).toarray():
+            res = linprog(g[1:], **kw)
+            if res.status != 0:
+                raise RuntimeError(f"edge type {ti}: implied-row LP failed with status {res.status}")
+            out["implied"] = min(out["implied"], float(res.fun + g[0]))
+    return out
+
+
+def check_elimination(cfg, inst, max_types=None):
+    """The reduced model is the full one (plan 5.1.7), checked algebraically, without a solver: same cost and coupling, same equalities, same PSD blocks through W, same box, and at kappa 1 the same dimension and every full inequality implied."""
+    md, modes, task, tr = inst
+    cfg_full = deep_merge(cfg, {"relaxation": {"eliminate_linear": False}})
+    prebuild_bases(cfg, md, modes, task, tr)
+    prebuild_bases(cfg_full, md, modes, task, tr)
+    alive = np.flatnonzero(tr["type_alive"])
+    if max_types:
+        alive = alive[np.linspace(0, alive.size - 1, max_types).astype(int)]
+    results = pool_map(lambda ti: elimination_type(cfg, cfg_full, md, task, modes, tr, int(ti)), alive, cfg["build"])
+    limits = dict(cost=1e-11, coupling=1e-11, eq_span=1e-9, blocks=1e-9, box=1e-5)
+    if int(cfg["relaxation"]["order"]) == 1:
+        limits["dim"] = 0
+    worst = {k: max(r[k] for r in results) for k in limits}
+    bad = [k for k in limits if worst[k] > limits[k]]
+    msg = f"{len(results)} edge types; worst " + ", ".join(f"{k} {v:.1e}" for k, v in worst.items())
+    if int(cfg["relaxation"]["order"]) == 1:
+        implied = min(r["implied"] for r in results)
+        msg += f", slack of the full inequalities at least {implied:.1e}"
+        if implied < -1e-7:
+            bad.append("implied")
+    return not bad, msg + (f"; OUT OF TOLERANCE: {bad}" if bad else "")
 
 
 def check_validity(cfg, instances, record, label):
@@ -2136,25 +2616,23 @@ def check_validity(cfg, instances, record, label):
 
 
 def check_negative_controls(cfg, inst):
-    """The validity check must be able to fail: true samples moved off the true set must be flagged (plan 5.4)."""
+    """The validity check must be able to fail: true samples moved off the true set must be flagged (plan 5.4). An eliminated row shows up as a distance from the edge's affine set."""
     md, modes, task, tr = inst
     mid = np.flatnonzero(tr["type_alive"] & (tr["type_kind"] == EDGE_KINDS.index("mid")))
     tail_of = lambda ti: modes[int(tr["type_tail"][ti])]
     ti_contact = int(next(t for t in mid if tail_of(t)["contact"]))
     ti_free = int(next(t for t in mid if not tail_of(t)["contact"]))
     sdp = cfg["relaxation"]["type"] == "sdp"
-    bilinear = "eq" if sdp else "ge"                            # exact rows in the moments, band rows in the Taylor model
     line_col = RX0 if abs(md["normals"][tail_of(ti_contact)["face"]][0]) > 0.5 else RY0
-    cases = [("torque", ti_contact, TAU, 1e-3, bilinear), ("translation", ti_contact, PX1, 0.2, bilinear),
-             ("contact line", ti_contact, line_col, 1e-3, "eq"), ("friction", ti_contact, FT, 0.5, "ge"),
-             ("static slider", ti_free, PX1, 1e-3, "eq"), ("zero force", ti_free, FN, 1e-3, "eq")]
+    cases = [("torque", ti_contact, TAU, 1e-3), ("translation", ti_contact, PX1, 0.2), ("contact line", ti_contact, line_col, 1e-3),
+             ("friction", ti_contact, FT, 0.5), ("static slider", ti_free, PX1, 1e-3), ("zero force", ti_free, FN, 1e-3)]
     if sdp:
-        cases.append(("unit norm", ti_contact, C0, 0.01, "eq"))
+        cases.append(("unit norm", ti_contact, C0, 0.01))
         if int(cfg["relaxation"]["order"]) >= 2:
-            cases.append(("localizing block", ti_contact, FN, 1.0, "psd"))
+            cases.append(("localizing block", ti_contact, FN, 1.0))
     rng = np.random.default_rng(13)
     lines = []
-    for name, ti, col, delta, cls in cases:
+    for name, ti, col, delta in cases:
         tail, head = type_modes(tr, modes, ti)
         kind = EDGE_KINDS[int(tr["type_kind"][ti])]
         V = sample_true_steps(md, task, kind, tail, head, 64, rng)
@@ -2164,28 +2642,30 @@ def check_negative_controls(cfg, inst):
         V = V.copy()
         V[:, col] += delta
         M = lift_points(rel, md, task, kind, tail, head, V)
-        if cls == "psd":
-            value = max(psd_violation(b, block_operator(b, rel["n"]), M, V, 0)[0] for b in rel["psd"])
+        if name == "localizing block":
+            values = dict(psd=max(psd_violation(b, block_operator(b, rel["n"]), M, V[:, rel["free"]], 0)[0] for b in rel["psd"]))
         else:
-            value = relaxation_violations(rel, M)[cls][0]
-        if value <= 1e-6:
-            return False, f"{name}: moving column {VAR_NAMES[col]} by {delta} went unflagged ({cls} violation {value:.1e})"
-        lines.append(f"{name} {value:.1e}")
+            values = {k: v[0] for k, v in relaxation_violations(rel, M).items()}
+            values["affine"] = affine_error(rel, V)
+        key = max(values, key=values.get)
+        if values[key] <= 1e-6:
+            return False, f"{name}: moving column {VAR_NAMES[col]} by {delta} went unflagged (largest violation {values[key]:.1e})"
+        lines.append(f"{name} {values[key]:.1e} ({key})")
     return True, "flagged: " + ", ".join(lines)
 
 
 def check_path_lift(cfg, inst):
-    """Along the hand push: every lifted step satisfies its model, each head's coupled coordinates equal the next tail's, and the linear costs sum to J_hand (tex 2.1, Thm 2.6)."""
+    """Along the hand push: every lifted step satisfies its model, each head's coupled coordinates equal the next tail's, and the linear costs sum to J_hand (tex 2.1, Thm 2.3)."""
     md, modes, task, tr = inst
     steps = hand_push(cfg, md, task, modes)
     worst, viol, J, J_true, prev = 0.0, 0.0, 0.0, 0.0, None
     for (kind, tail, head, v), e in zip(steps, path_edge_ids(tr, modes, steps)):
         rel = relax_edge_type(cfg, md, task, modes, tr, int(tr["edge_type"][e]))
         M = lift_points(rel, md, task, kind, tail, head, v[None])
-        viol = max(viol, max(value for value, _ in relaxation_violations(rel, M).values()))
+        viol = max(viol, max(value for value, _ in relaxation_violations(rel, M).values()), affine_error(rel, v[None]))
         if prev is not None:
-            worst = max(worst, float(np.max(np.abs(prev - M[0, rel["tail_slots"]]))))
-        prev = M[0, rel["head_slots"]]
+            worst = max(worst, float(np.max(np.abs(prev - rel["tail_map"] @ M[0]))))
+        prev = rel["head_map"] @ M[0]
         J += float(M[0] @ rel["c"])
         J_true += poly_eval(edge_cost(cfg, tail, head), v)
     ok = worst <= 1e-12 and viol <= 1e-9 and abs(J - J_true) <= 1e-12
@@ -2232,9 +2712,10 @@ def selftest_m1(cfg):
     """Milestone M1 (plan 5.4, 17): the outer models on the full mode set, for every relaxation the run matrix uses."""
     st = cfg["selftest"]
     base = deep_merge(cfg, {"trellis": {"faces": [0, 1, 2, 3], "regions": "all"},
-                            "relaxation": {"type": "sdp", "order": 1, "regions": {"theta_splits": 1, "lambda_splits": 1},
+                            "relaxation": {"type": "sdp", "order": 1, "eliminate_linear": True, "regions": {"theta_splits": 1, "lambda_splits": 1},
                                            "taylor_mode": "band", "cost_model": "tangent_planes"}})
     sdp = {k: deep_merge(base, {"relaxation": {"order": k}}) for k in (1, 2, 3)}
+    full_form = deep_merge(sdp[1], {"relaxation": {"eliminate_linear": False}})
     regioned = deep_merge(base, {"relaxation": {"regions": {"theta_splits": int(st["theta_splits"])}}})
     taylor = deep_merge(regioned, {"relaxation": {"type": "taylor"}})
     mcc = deep_merge(taylor, {"relaxation": {"taylor_mode": "mccormick"}})
@@ -2252,6 +2733,7 @@ def selftest_m1(cfg):
 
     def tables():
         record["sizes"] = {
+            "sdp_k1_full": relaxation_table(full_form, *i1, "SDP kappa 1, full form (for comparison)"),
             "sdp_k1": relaxation_table(sdp[1], *i1, "SDP kappa 1"),
             "sdp_k2": relaxation_table(sdp[2], *i1, "SDP kappa 2"),
             "sdp_k3": relaxation_table(sdp[3], *i1, "SDP kappa 3"),
@@ -2267,6 +2749,9 @@ def selftest_m1(cfg):
         ("M1 lifted rows match their polynomials, kappa 1", lambda: check_lift_identity(sdp[1], i1)),
         ("M1 lifted rows match their polynomials, kappa 2", lambda: check_lift_identity(sdp[2], i1)),
         ("M1 lifted rows match their polynomials, kappa 3 (3 edge types)", lambda: check_lift_identity(sdp[3], i1, 3)),
+        ("M1 elimination leaves the model unchanged, kappa 1", lambda: check_elimination(sdp[1], i1)),
+        ("M1 elimination leaves the model unchanged, kappa 2 (12 edge types)", lambda: check_elimination(sdp[2], i1, 12)),
+        ("M1 validity 5.4, SDP kappa 1, full form", lambda: check_validity(full_form, plain, record, "sdp_k1_full")),
         ("M1 validity 5.4, SDP kappa 1", lambda: check_validity(sdp[1], plain, record, "sdp_k1")),
         ("M1 validity 5.4, SDP kappa 2", lambda: check_validity(sdp[2], plain, record, "sdp_k2")),
         ("M1 validity 5.4, SDP kappa 3", lambda: check_validity(sdp[3], plain, record, "sdp_k3")),
@@ -2292,9 +2777,170 @@ def selftest_m1(cfg):
     return ok
 
 
+def cone_convention_value(cfg, solver):
+    """min <C, X> subject to trace X = 1, X PSD, whose value is C's smallest eigenvalue: a wrong triangle order or scaling in svec_position gives another value. Returns (solver's value, exact value)."""
+    C = np.array([[2.0, 1.0, 0.0], [1.0, 3.0, 1.5], [0.0, 1.5, 5.0]])
+    iu, ju = np.triu_indices(3)
+    pos = svec_position(iu, ju, 3, solver)
+    c, trace = np.zeros(6), np.zeros(6)
+    c[pos] = C[iu, ju] * np.where(iu == ju, 1.0, math.sqrt(2.0))
+    trace[pos[iu == ju]] = 1.0
+    A = sp.vstack([sp.csr_matrix(trace), -sp.identity(6, format="csr")], format="csc")
+    prob = dict(solver=solver, A=A, b=np.r_[1.0, np.zeros(6)], c=c, nz=1, nl=0, sizes=[3])
+    return float(c @ solve_conic(cfg, prob)["x"]), float(np.linalg.eigvalsh(C)[0])
+
+
+def check_cone_conventions(cfg):
+    """Each solver's PSD triangle convention, on a problem with a known answer."""
+    solvers = ["clarabel", "scs"]
+    results = pool_map(lambda s: cone_convention_value(cfg, s), solvers, cfg["build"])
+    worst = max(abs(a - b) for a, b in results)
+    return worst <= 1e-4, ", ".join(f"{s} {a:.6f}" for s, (a, _) in zip(solvers, results)) + f", exact {results[0][1]:.6f}"
+
+
+def check_reference_assembly(cfg, inst, solver, record, key):
+    """The assembled program holds the hand push: its lift is feasible and costs J_hand. Dropping one step must break conservation, so the check can fail. Stores J_hand in record[key]."""
+    md, modes, task, tr = inst
+    rels = edge_models(cfg, md, task, modes, tr)
+    prob = assemble_conic(cfg, tr, rels, solver)
+    steps = hand_push(cfg, md, task, modes)
+    ids = path_edge_ids(tr, modes, steps)
+    where = {int(e): i for i, e in enumerate(prob["alive"])}
+    x = np.zeros(prob["c"].size)
+    J_hand = 0.0
+    for (kind, tail, head, v), e in zip(steps, ids):
+        i = where[int(e)]
+        x[prob["offs"][i]:prob["offs"][i + 1]] = lift_points(rels[int(tr["edge_type"][e])], md, task, kind, tail, head, v[None])[0]
+        J_hand += poly_eval(edge_cost(cfg, tail, head), v)
+    eq, ge, psd = conic_residuals(prob, x)
+    J = float(prob["c"] @ x)
+    i = where[int(ids[len(ids) // 2])]
+    broken = x.copy()
+    broken[prob["offs"][i]:prob["offs"][i + 1]] = 0.0
+    eq_broken = conic_residuals(prob, broken)[0]
+    record[key] = J_hand
+    ok = eq <= 1e-9 and ge <= 1e-9 and psd <= 1e-9 and abs(J - J_hand) <= 1e-10 and eq_broken >= 0.5
+    return ok, (f"{prob['c'].size} variables, {prob['A'].shape[0]} rows, {len(prob['sizes'])} PSD blocks: hand push residuals eq {eq:.1e}, ge {ge:.1e}, psd {psd:.1e}; "
+                f"cost {J:.6f} vs J_hand {J_hand:.6f}; dropping a step breaks conservation by {eq_broken:.2f}")
+
+
+def selftest_m2(cfg):
+    """Milestone M2 (plan 10.4, 17): the reference solve on the small instance. J_rel stays under J_hand, the reduced and full forms agree, and the table shows how tight each relaxation is."""
+    st, m2 = cfg["selftest"], cfg["selftest"]["m2"]
+    t0 = time.perf_counter()
+    small = deep_merge(cfg, {"trellis": {"N": st["N"], "faces": st["faces"], "regions": st["regions"]},
+                             "relaxation": {"type": "sdp", "order": 1, "eliminate_linear": True, "regions": {"theta_splits": 1, "lambda_splits": 1},
+                                            "taylor_mode": "band", "cost_model": "tangent_planes"}})
+    regioned = deep_merge(small, {"relaxation": {"regions": {"theta_splits": int(st["theta_splits"])}}})
+    reduced, full_form = "SDP order 1", "SDP order 1, full form"
+    models = {reduced: small, full_form: deep_merge(small, {"relaxation": {"eliminate_linear": False}}),
+              "Taylor bands": deep_merge(regioned, {"relaxation": {"type": "taylor"}}),
+              "Taylor McCormick": deep_merge(regioned, {"relaxation": {"type": "taylor", "taylor_mode": "mccormick"}})}
+    tasks = [str(t) for t in m2["tasks"]]
+    plain = {t: build_instance(deep_merge(small, {"task": t})) for t in tasks}
+    split = {t: build_instance(deep_merge(regioned, {"task": t})) for t in tasks}
+
+    def instance(model, t):
+        """The instance of one model and task; run B's edge types are pruned by its own rows, on a private copy."""
+        mcfg = models[model]
+        if mcfg["relaxation"]["type"] != "taylor":
+            prebuild_bases(mcfg, *plain[t])
+            return plain[t]
+        md, modes, task, tr = split[t]
+        own = dict(tr, type_alive=tr["type_alive"].copy())
+        prune_outer(mcfg, md, modes, task, own)
+        return md, modes, task, own
+
+    jobs = [(models[model], instance(model, t), f"{t}: {model}") for t in tasks for model in models]
+    short = deep_merge(small, {"task": m2["order2"]["task"], "trellis": {"N": int(m2["order2"]["N"])}, "reference": {"time_limit_s": float(m2["order2"]["time_limit_s"])}})
+    short_two = deep_merge(short, {"relaxation": {"order": 2}})
+    short_inst = build_instance(short)
+    prebuild_bases(short, *short_inst)
+    prebuild_bases(short_two, *short_inst)
+    short_labels = [f"{short['task']}, N = {short['trellis']['N']}: SDP order {k}" for k in (1, 2)]
+    print(f"built the M2 instances in {time.perf_counter() - t0:.1f}s; the solves print as they finish", flush=True)
+    results, hand = {}, {}
+
+    def run_jobs(batch):
+        for r in pool_map(lambda i: reference_job(*batch[i]), range(len(batch)), cfg["build"]):
+            results[r["label"]] = r
+
+    def solve_small():
+        run_jobs(jobs)
+        errors = [r["label"] for r in results.values() if "error" in r]
+        return not errors, f"{len(jobs)} solves" + (f"; errors on {errors}" if errors else "")
+
+    def below_hand():
+        tol = float(m2["tol_hand"])
+        J_hand = hand[st["task"]]
+        lines, ok = [], True
+        for model in models:
+            r = results[f"{st['task']}: {model}"]
+            if r["solved"]:
+                ok &= r["J"] <= J_hand + tol
+            elif model != full_form:                # the full form has no interior, and may stop early: reported, not required
+                ok = False
+            lines.append(f"{model} {'not solved' if r['J'] is None else format(r['J'], '.6f')} ({r.get('status', 'error')})")
+        return ok, f"J_hand {J_hand:.6f}; " + ", ".join(lines)
+
+    def forms_agree():
+        tol = float(m2["tol_forms"])
+        lines, ok = [], True
+        for t in tasks:
+            a, b = results[f"{t}: {reduced}"], results[f"{t}: {full_form}"]
+            if a["infeasible"] or b["infeasible"]:
+                ok &= a["infeasible"] and b["infeasible"]
+                lines.append(f"{t}: {a.get('status')} and {b.get('status')}")
+                continue
+            ok &= a["solved"]
+            if a["J"] is None or b["J"] is None:
+                ok = False
+                lines.append(f"{t}: no value to compare")
+                continue
+            gap = abs(a["J"] - b["J"])
+            if b["solved"]:
+                ok &= gap <= tol * max(1.0, abs(a["J"]))
+            lines.append(f"{t}: reduced {a['J']:.8f} in {a['seconds']:.1f} s, full {b['J']:.8f} in {b['seconds']:.1f} s ({b['status']}), difference {gap:.1e}")
+        return ok, "; ".join(lines)
+
+    def order_two():
+        run_jobs([(short, short_inst, short_labels[0]), (short_two, short_inst, short_labels[1])])
+        one, two = results[short_labels[0]], results[short_labels[1]]
+        J_hand = hand["order2"]
+        if not one["solved"] or two["J"] is None:
+            return False, f"order 1 {one.get('status', one.get('error'))}, order 2 {two.get('status', two.get('error'))}"
+        msg = f"J_hand {J_hand:.6f}; order 1 {one['J']:.6f}; order 2 {two['J']:.6f} ({two['solver']}, {two['status']}, {two['iters']} iterations, {two['seconds']:.0f} s)"
+        if not two["solved"]:
+            return True, msg + "; order 2 did not converge inside the time limit, so its value is approximate and not checked"
+        slack = 1e-3                                # SCS's accuracy
+        return one["J"] - slack <= two["J"] <= J_hand + slack, msg
+
+    checks = [
+        ("M2 PSD triangle conventions, on a known answer", lambda: check_cone_conventions(small)),
+        ("M2 assembly holds the hand push, SDP order 1", lambda: check_reference_assembly(small, plain[st["task"]], "clarabel", hand, st["task"])),
+        ("M2 assembly holds the hand push, SDP order 1, full form", lambda: check_reference_assembly(models[full_form], plain[st["task"]], "clarabel", {}, "full")),
+        ("M2 assembly holds the hand push, Taylor", lambda: check_reference_assembly(models["Taylor bands"], split[st["task"]], "clarabel", {}, "taylor")),
+        ("M2 assembly holds the hand push, Taylor McCormick", lambda: check_reference_assembly(models["Taylor McCormick"], split[st["task"]], "clarabel", {}, "mccormick")),
+        ("M2 assembly holds the hand push, SDP order 2", lambda: check_reference_assembly(short_two, short_inst, "scs", hand, "order2")),
+        ("M2 reference solves on the small instance", solve_small),
+        ("M2 J_rel <= J_hand", below_hand),
+        ("M2 the reduced and full forms give the same J_rel", forms_agree),
+        ("M2 SDP order 2 on a shorter horizon", order_two),
+    ]
+    ok, checked = run_checks(checks)
+    print(f"\nreference values, delta = {cfg['solver']['delta']}", flush=True)
+    for r in results.values():
+        print(reference_line(r), flush=True)
+    out = ROOT / cfg["output"]["root"] / "selftest" / "m2.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(dict(ok=ok, results=checked, solves=list(results.values()), J_hand=hand), indent=2))
+    print(f"\n{'ALL M2 CHECKS PASSED' if ok else 'SOME M2 CHECKS FAILED'} in {time.perf_counter() - t0:.0f}s; details in {out}", flush=True)
+    return ok
+
+
 def selftest(cfg):
     """The milestone checks in order; a milestone runs only after the one before it passes (plan 0)."""
-    return selftest_m0(cfg) and selftest_m1(cfg)
+    return selftest_m0(cfg) and selftest_m1(cfg) and selftest_m2(cfg)
 
 
 def selftest_m0(cfg):
@@ -2342,6 +2988,7 @@ def main():
     ap.add_argument("--selftest", action="store_true", help="run the milestone checks")
     ap.add_argument("--build", action="store_true", help="build, prune, validate and save the edge models of the run")
     ap.add_argument("--band_report", action="store_true", help="print the Taylor bands and the region sizing table of the run")
+    ap.add_argument("--reference", action="store_true", help="solve the run's whole relaxation on the CPU for J_rel (small instances)")
     args = ap.parse_args()
     cfg = load_config(args.run, args.set)
     if args.task:
@@ -2350,6 +2997,15 @@ def main():
         sys.exit(0 if selftest(cfg) else 1)
     if args.band_report:
         band_report(cfg, *build_instance(cfg))
+        return
+    if args.reference:
+        md, modes, task, tr = build_instance(cfg)
+        build_relaxations(cfg, md, modes, task, tr)     # stops on a validity failure
+        result = reference_job(cfg, (md, modes, task, tr), cfg["run_name"])
+        path = ROOT / cfg["output"]["root"] / cfg["run_name"] / task["name"] / str(cfg["seed"]) / "reference.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(result, indent=2))
+        print(f"saved {path}")
         return
     if args.build:
         md, modes, task, tr = build_instance(cfg)

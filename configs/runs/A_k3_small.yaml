@@ -1,7 +1,0 @@
-# Moment matrix 816 x 816 per edge. If a round takes more than about 5 s, also set
-# trellis.faces: [0, 2] (the selftest mode set) and log that (plan 16).
-run_name: A_k3_small
-task: T2_rotate_90
-trellis: {N: 8}
-relaxation: {order: 3}
-exclusive: true

@@ -1,0 +1,8 @@
+# Optional, CPU only: SDP order 2 on the small instance with rotation, through the reference solve.
+#   python push_model.py --run ref_tiny_k2 --reference
+# SCS is a first-order solver, so this takes hours and its value is approximate. It is not a matrix job.
+run_name: ref_tiny_k2
+task: T3_translate_rotate
+trellis: {N: 8, faces: [0, 2], regions: [strip_0, strip_2, corner_1, corner_2]}
+relaxation: {order: 2}
+reference: {time_limit_s: 14400}

@@ -1,0 +1,5 @@
+# SDP order 3 at the full horizon, with A and A_k2 as its baselines. It stays only if M3 shows its
+# solve is fast enough: if it is too slow, this run is removed, not shrunk (plan 1).
+run_name: A_k3
+relaxation: {order: 3}
+exclusive: true

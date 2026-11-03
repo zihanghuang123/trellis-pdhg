@@ -177,21 +177,28 @@ def timed(fn, *args, reps=5):
     return float(np.median(times)), compile_s, out
 
 
-def make_runner(rows, peak, reps):
-    """A run(group, name, n, batch, fn, args, flops, check, **tags) that times one case, prints it and appends it to rows."""
-    def run(group, name, n, batch, fn, args, flops, check=None, **tags):
+def make_runner(rows, peak, bandwidth, reps):
+    """A run(group, name, n, batch, fn, args, flops, check, traffic, **tags) that times one case, prints it and appends it to rows.
+
+    flops and traffic are per item. traffic is a lower bound on the bytes one item reads and writes
+    in GPU memory: a kernel near the memory bandwidth is saturated, even when its FLOP share is low.
+    """
+    def run(group, name, n, batch, fn, args, flops, check=None, traffic=None, **tags):
         try:
             sec, comp_s, out = timed(fn, *args, reps=reps)
             row = dict(group=group, name=name, n=n, batch=batch, seconds=sec, compile_s=round(comp_s, 3),
                        per_item_us=sec / batch * 1e6, **tags)
             if flops:
                 row.update(gflops=flops * batch / sec / 1e9, roofline=flops * batch / sec / peak)
+            if traffic:
+                row.update(bandwidth_share=traffic * batch / sec / bandwidth)
             if check is not None:
                 row.update(check(out))
             rows.append(row)
             extra = "".join(f" {k} {row[k]:.1e}" for k in ("err_max", "res_max", "residual") if k in row)
             print(f"{group:8s} {name:20s} n={n:5d} batch={batch:6d} {sec * 1e3:10.3f} ms {row['per_item_us']:10.3f} us/item"
-                  + (f" {100 * row['roofline']:6.2f}% of peak" if flops else "") + extra
+                  + (f" {100 * row['roofline']:6.2f}% of peak" if flops else "")
+                  + (f" {100 * row['bandwidth_share']:6.2f}% of bw" if traffic else "") + extra
                   + "".join(f" {k}={v}" for k, v in tags.items()), flush=True)
         except Exception as exc:
             rows.append(dict(group=group, name=name, n=n, batch=batch, error=f"{type(exc).__name__}: {exc}"[:400], **tags))
@@ -238,7 +245,7 @@ def bench_psd(cfg):
     pc, bc = cfg["bench"]["psd"], cfg["bench"]
     peak, per_round = float(bc["peak_tflops_fp64"]) * 1e12, int(bc["edges_per_round"])
     rows = []
-    run = make_runner(rows, peak, int(pc.get("repeats", 5)))
+    run = make_runner(rows, peak, float(bc["peak_bandwidth_gbs"]) * 1e9, int(pc.get("repeats", 5)))
     for n, batches in pc["sizes"]:
         ps = sorted({min(int(p), n // 2) for p in pc["lowrank_p"]})
         for batch in batches:
@@ -251,10 +258,10 @@ def bench_psd(cfg):
             check = projection_check(exact, x1)
             tags = dict(order=ORDER_OF_SIZE.get(n), positives=f"{int(npos.min())}-{int(npos.max())}")
             if batch * n * n <= float(pc["eigh_max_elements"]):
-                run("psd", "eigh", n, batch, psd_eigh, (x1,), 9 * n ** 3, check, **tags)
+                run("psd", "eigh", n, batch, psd_eigh, (x1,), 9 * n ** 3, check, traffic=40 * n * n, **tags)
             for p in ps:
                 run("psd", f"lowrank_p{p}", n, batch, psd_lowrank, (x1, basis[..., -p:]),
-                    8 * n * n * p + 40 * n * p * p, check, **tags)
+                    8 * n * n * p + 40 * n * p * p, check, traffic=8 * (3 * n * n + 24 * n * p), **tags)
             del x1, basis, exact
     verdicts = batching_verdicts(rows)
     print_verdicts(verdicts)
@@ -277,7 +284,7 @@ def bench_linalg(cfg):
     """Cholesky and triangular solves at the IPM and tree sizes, the low-rank tree merge's small eigh and orthonormalization, and the coupling scatter/gather (plan 8.1, 11, 6.3)."""
     lc, bc = cfg["bench"]["linalg"], cfg["bench"]
     rows = []
-    run = make_runner(rows, float(bc["peak_tflops_fp64"]) * 1e12, int(lc.get("repeats", 5)))
+    run = make_runner(rows, float(bc["peak_tflops_fp64"]) * 1e12, float(bc["peak_bandwidth_gbs"]) * 1e9, int(lc.get("repeats", 5)))
     for n, batches in lc["cholesky"]:
         for batch in batches:
             k1, k2, k3 = jax.random.split(jax.random.PRNGKey(7 * n + batch), 3)
@@ -290,20 +297,20 @@ def bench_linalg(cfg):
             def residual(out, a=a, bv=bv):
                 r = jnp.linalg.norm(a @ out - bv, axis=(-2, -1)) / jnp.linalg.norm(bv, axis=(-2, -1))
                 return dict(residual=float(jnp.max(r)))
-            run("chol", "cholesky", n, batch, jnp.linalg.cholesky, (a,), n ** 3 / 3)
-            run("chol", "cholesky_solve_vec", n, batch, chol_solve, (a, bv), n ** 3 / 3 + 2 * n ** 2, residual)
-            run("chol", "cholesky_solve_mat", n, batch, chol_solve, (a, bm), n ** 3 / 3 + 2 * n ** 3)
-            run("chol", "matmul", n, batch, lambda a: a @ a, (a,), 2 * n ** 3)
+            run("chol", "cholesky", n, batch, jnp.linalg.cholesky, (a,), n ** 3 / 3, traffic=12 * n * n)
+            run("chol", "cholesky_solve_vec", n, batch, chol_solve, (a, bv), n ** 3 / 3 + 2 * n ** 2, residual, traffic=20 * n * n + 32 * n)
+            run("chol", "cholesky_solve_mat", n, batch, chol_solve, (a, bm), n ** 3 / 3 + 2 * n ** 3, traffic=52 * n * n)
+            run("chol", "matmul", n, batch, lambda a: a @ a, (a,), 2 * n ** 3, traffic=24 * n * n)
             del a, bv, bm
     for k, batches in lc["merge_eigh"]:
         for batch in batches:
             x = jax.random.normal(jax.random.PRNGKey(11 * k + batch), (batch, k, k))
-            run("merge", "eigh", k, batch, jnp.linalg.eigh, (0.5 * (x + swap(x)),), 9 * k ** 3)
+            run("merge", "eigh", k, batch, jnp.linalg.eigh, (0.5 * (x + swap(x)),), 9 * k ** 3, traffic=16 * k * k)
     for m, k, batches in lc["merge_orth"]:
         for batch in batches:
             x = jax.random.normal(jax.random.PRNGKey(13 * k + batch), (batch, m, k))
-            run("merge", f"qr_{m}x{k}", k, batch, lambda x: jnp.linalg.qr(x)[0], (x,), 4 * m * k * k)
-            run("merge", f"gram_orth_{m}x{k}", k, batch, lambda x: orthonormalize(x, 1e-10), (x,), 4 * m * k * k)
+            run("merge", f"qr_{m}x{k}", k, batch, lambda x: jnp.linalg.qr(x)[0], (x,), 4 * m * k * k, traffic=16 * m * k)
+            run("merge", f"gram_orth_{m}x{k}", k, batch, lambda x: orthonormalize(x, 1e-10), (x,), 4 * m * k * k, traffic=32 * m * k)
     q = int(lc["coupling"]["q"])
     for e in lc["coupling"]["edges"]:
         nv = max(8, e // 4)
@@ -321,7 +328,11 @@ def bench_linalg(cfg):
 
 
 def batching_verdicts(rows):
-    """Per primitive and size: per-item time at the largest batch over the smallest (falls when batching helps), the share of the FLOP roofline, and a verdict."""
+    """Per primitive and size: per-item time at the largest batch over the smallest (falls when batching helps), the shares of the FLOP and memory-bandwidth rooflines, and a verdict.
+
+    A flat per-item time means either a saturated kernel or a loop over the batch. The rooflines
+    tell them apart: a kernel at a fair share of either one is saturated, not looping.
+    """
     groups = {}
     for r in rows:
         if "error" not in r:
@@ -331,8 +342,8 @@ def batching_verdicts(rows):
         rs = sorted(rs, key=lambda r: r["batch"])
         small, large = rs[0], rs[-1]
         ratio = large["per_item_us"] / small["per_item_us"] if len(rs) > 1 else None
-        roof = large.get("roofline")
-        if (ratio is not None and ratio <= 0.8) or (roof is not None and roof >= 0.2):
+        roof, bw = large.get("roofline"), large.get("bandwidth_share")
+        if (ratio is not None and ratio <= 0.8) or (roof is not None and roof >= 0.2) or (bw is not None and bw >= 0.2):
             verdict = "batched"
         elif ratio is None:
             verdict = "one batch size only"
@@ -340,17 +351,18 @@ def batching_verdicts(rows):
             verdict = "NOT BATCHED?"
         out.append(dict(group=group, name=name, n=n, batches=[r["batch"] for r in rs],
                         per_item_us=[r["per_item_us"] for r in rs], per_item_ratio=ratio, roofline_at_largest=roof,
-                        seconds_at_largest=large["seconds"], err_max=large.get("err_max"), verdict=verdict))
+                        bandwidth_at_largest=bw, seconds_at_largest=large["seconds"], err_max=large.get("err_max"), verdict=verdict))
     return out
 
 
 def print_verdicts(verdicts):
-    print("\nBATCHING VERDICTS (per-item time at the largest batch / at the smallest; <= 0.8, or >= 20% of the FP64 roofline, counts as batched)")
+    print("\nBATCHING VERDICTS (per-item time at the largest batch / at the smallest; <= 0.8, or >= 20% of the FP64 roofline or of memory bandwidth, counts as batched)")
     for v in verdicts:
         ratio = "   -  " if v["per_item_ratio"] is None else f"{v['per_item_ratio']:6.2f}"
         roof = "   -   " if v["roofline_at_largest"] is None else f"{100 * v['roofline_at_largest']:6.2f}%"
+        bw = "   -   " if v["bandwidth_at_largest"] is None else f"{100 * v['bandwidth_at_largest']:6.2f}%"
         print(f"  {v['group']:8s} {v['name']:20s} n={v['n']:5d} batches {str(v['batches']):14s} ratio {ratio} "
-              f"roofline {roof}  {v['seconds_at_largest'] * 1e3:10.3f} ms at largest  {v['verdict']}", flush=True)
+              f"roofline {roof}  bandwidth {bw}  {v['seconds_at_largest'] * 1e3:10.3f} ms at largest  {v['verdict']}", flush=True)
 
 
 def save_bench(cfg, name, rows, verdicts):

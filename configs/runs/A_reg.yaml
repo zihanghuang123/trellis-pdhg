@@ -1,0 +1,4 @@
+# Tree blocks of width 160 x 28 = 4480.
+run_name: A_reg
+relaxation: {regions: {theta_splits: 8}}
+exclusive: true

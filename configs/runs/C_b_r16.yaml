@@ -1,0 +1,2 @@
+run_name: C_b_r16
+tree: {type: lowrank_b, rank: 16}

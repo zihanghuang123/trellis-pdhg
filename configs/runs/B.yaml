@@ -1,0 +1,3 @@
+run_name: B
+relaxation: {type: taylor, regions: {theta_splits: 8}}
+skipping: {face_cache: true}

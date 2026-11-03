@@ -40,10 +40,16 @@ relaxation:
   order: 1                       # kappa
   couple_second_moments: true
   rlt: false
+  ball: true                     # redundant ball row of tex 3.3 at kappa >= 2 (the interval rows imply it at kappa 1)
   regions: {theta_splits: 1, lambda_splits: 1}
   taylor_mode: band              # band | mccormick   (B only)
   cost_model: tangent_planes     # tangent_planes | soc (B only)
   cost_planes: 16
+  size_regions: {trans: 1.0e-3, torque: 1.0e-4, max_splits: 4096}   # offline sizing targets in m and N m (5.3)
+  # True samples per edge type that must satisfy every row and PSD block (5.4); fewer at kappa 3,
+  # where a moment vector has 54,264 entries. PSD blocks are checked on all samples through their
+  # rank-one identity, and by a direct eigenvalue on a subset when they are larger than 32 x 32.
+  validity: {samples: 10000, samples_k3: 200, tol_rows: 1.0e-9, tol_psd: 1.0e-10, eig_samples: 16, eig_samples_large: 2, seed: 0}
 
 solver:
   rounds_max: 50000              # safety stop only
@@ -60,6 +66,7 @@ solver:
   dtype: float64
   qp_block: auto                 # exact_ipm for kappa=1, split_rows for kappa>=2
   psd_proj: auto                 # auto | eigh | lowrank | polar_ns: eigh at kappa 1, lowrank (polar_ns fallback) above (8.2)
+  psd_lowrank: {p: 8, tol: 1.0e-6, exact_check_every: 50}   # basis size, residual that sends a matrix to the fallback, rounds between exact-error logs (kappa 1)
   ipm: {iters: 40, tol: 1.0e-11}
   restarts: {scheme: pdlp_kkt, beta_sufficient: 0.2, beta_necessary: 0.8}
   checkpoint_every: 2000
@@ -115,6 +122,9 @@ extraction:
 render: {fps: 10, filmstrip_cols: 8}
 output: {root: runs}
 
+# Build-time CPU work (LP pruning, validity checks) runs in this many forked worker processes.
+build: {workers: 16, timeout_s: 3600}
+
 # Build-time pruning (plan 6.1): per-edge-type LPs over the linear rows of the true model.
 pruning:
   box_margin: 1.0e-7             # relative outward pad on LP-tightened variable boxes
@@ -126,10 +136,12 @@ selftest:
   task: T1_push_straight
   faces: [0, 2]
   regions: [strip_0, strip_2, corner_1, corner_2]
+  theta_splits: 8                # the region copies M1 checks (A-reg, B)
 
 # M0 benchmarks (plan 8.2 and section 0: every round primitive must truly batch).
 bench:
-  peak_tflops_fp64: 19.5         # A100 FP64 tensor-core peak: the roofline for the batching verdicts
+  peak_tflops_fp64: 19.5         # A100 FP64 tensor-core peak: the FLOP roofline for the batching verdicts
+  peak_bandwidth_gbs: 2039       # A100 80 GB SXM memory bandwidth: the traffic roofline for the same verdicts
   edges_per_round: 2600          # matrices per round at N = 32 (one per edge), for the per-round summary
   eigh: [[16, 2600], [16, 80000], [136, 2600], [136, 20000], [816, 64], [816, 256]]   # --bench_eigh: [size, batch]
   eigh_repeats: 5

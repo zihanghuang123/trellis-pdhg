@@ -1,0 +1,3 @@
+# Milestone M5 equality check only, not a matrix job.
+run_name: A_noskip
+skipping: {zero_test: false, compaction: none}

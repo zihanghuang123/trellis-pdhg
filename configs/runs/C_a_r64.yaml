@@ -1,0 +1,2 @@
+run_name: C_a_r64
+tree: {type: lowrank_a, rank: 64}

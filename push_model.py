@@ -1,21 +1,33 @@
-"""Planar pushing on a time-layered trellis (plan sections 4-6): geometry and modes, the true per-edge constraints as one polynomial table, the true-model step, trellis assembly with pruning, and the milestone self-tests.
+"""Planar pushing on a time-layered trellis (plan sections 4-6): geometry and modes, the true per-edge constraints as one polynomial table, the convex outer models, the true-model step, trellis assembly with pruning, and the milestone self-tests.
 
 Math: docs/trajopt_detailed.tex (source of truth). Implementation: IMPLEMENTATION_PLAN.md.
 
-    python push_model.py --selftest            # milestone checks implemented so far (M0)
-    python push_model.py --run A --build       # build, prune and save one run's trellis
+    python push_model.py --selftest              # milestone checks implemented so far (M0, M1)
+    python push_model.py --run A --build         # build, prune, validate and save one run's edge models
+    python push_model.py --run B --band_report   # the Taylor band widths and the region sizing table
 """
 import argparse
+import collections
 import copy
+import itertools
 import json
 import math
+import multiprocessing
+import os
 import sys
 import time
 import traceback
 from pathlib import Path
 
+# Build-time CPU work runs in forked workers (pool_map): one BLAS thread each.
+for _name in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS"):
+    os.environ.setdefault(_name, "1")
+
 import numpy as np
+import scipy.linalg
+import scipy.sparse as sp
 import yaml
+from scipy.optimize import linprog
 
 ROOT = Path(__file__).resolve().parent
 
@@ -65,6 +77,32 @@ def resolve_task(cfg, name=None):
                 start_region=spec.get("start_region", common.get("start_region")))
 
 
+# ===== WORKERS =====
+# Build-time CPU work runs in forked processes; nothing here touches the GPU, and this script never
+# imports JAX. Workers run every HiGHS LP and the parent never does: HiGHS keeps a thread pool per
+# process, and a fork of a process that has started one inherits a scheduler whose threads are gone.
+
+_POOL_FN = None
+
+
+def _pool_call(item):
+    return _POOL_FN(item)
+
+
+def pool_map(fn, items, build):
+    """[fn(x) for x in items] in forked workers, one item at a time because edge types differ in cost. With one worker, or no fork on this platform, it runs in-process and never forks."""
+    global _POOL_FN
+    items = list(items)
+    if not items:
+        return []
+    workers = min(int(build["workers"]), os.cpu_count() or 1)
+    if workers <= 1 or "fork" not in multiprocessing.get_all_start_methods():
+        return [fn(x) for x in items]
+    _POOL_FN = fn
+    with multiprocessing.get_context("fork").Pool(min(workers, len(items))) as pool:
+        return pool.map_async(_pool_call, items, chunksize=1).get(timeout=float(build["timeout_s"]))
+
+
 # ===== MODEL =====
 # Slider body frame: faces j = 0, 1, 2, 3 are +x, +y, -x, -y. Face j has outward normal n_j,
 # counter-clockwise tangent t_j = R(+90 deg) n_j (so the 2-D cross product n_j x t_j = +1),
@@ -86,7 +124,7 @@ def mean_distance_rectangle(ax, ay, n):
 
 
 def build_model(cfg):
-    """Geometry, limit surface and limits of plan 4.1 as plain floats and arrays."""
+    """Geometry, limit surface and limits of plan 4.1 as plain floats and arrays, plus the region counts of plan 5.3."""
     m, tr = cfg["model"], cfg["trellis"]
     ax, ay = float(m["slider"]["half_x"]), float(m["slider"]["half_y"])
     normals = FACE_NORMALS.copy()
@@ -109,12 +147,20 @@ def build_model(cfg):
                 rp=rp, mu_c=mu_c, v_max=float(m["pusher"]["v_max_step"]),
                 fn_max=fn_max, ft_max=mu_c * fn_max, tau_bound=tau_bound,
                 f_max=f_max, rbar=rbar, tau_max=tau_max, c_v=c_v, dt=dt, theta_step_max=theta_step_max,
-                p_box=np.asarray(m["workspace"]["p_box"], float), r_ws=float(m["workspace"]["r_ws"]))
+                p_box=np.asarray(m["workspace"]["p_box"], float), r_ws=float(m["workspace"]["r_ws"]),
+                theta_splits=int(cfg["relaxation"]["regions"]["theta_splits"]),
+                lambda_splits=int(cfg["relaxation"]["regions"]["lambda_splits"]))
 
 
 def build_modes(cfg):
-    """Contact modes (configured faces x friction types) first, then the configured non-contact regions (plan 4.3)."""
+    """Contact modes (configured faces x friction types) first, then the configured non-contact regions (plan 4.3), each copied per region (plan 5.3).
+
+    A copy keeps its parent's name in 'base'. 'theta' and 'lam' are its region indices, or None
+    when that split is off.
+    """
     tr = cfg["trellis"]
+    regions_cfg = cfg["relaxation"]["regions"]
+    n_theta, n_lam = int(regions_cfg["theta_splits"]), int(regions_cfg["lambda_splits"])
     faces = [int(j) for j in tr.get("faces", [0, 1, 2, 3])]
     use_all = tr.get("regions", "all") == "all"
     regions = list(REGION_NAMES) if use_all else list(tr["regions"])
@@ -123,9 +169,15 @@ def build_modes(cfg):
         raise ValueError(f"unknown regions or contact types: {unknown}")
     if use_all and int(tr.get("noncontact_regions", 8)) != 8:
         raise ValueError("trellis.noncontact_regions must be 8 when trellis.regions is 'all'")
-    modes = [dict(name=f"c{j}_{ct}", contact=True, face=j, ctype=ct, region=None)
-             for j in faces for ct in tr["contact_types"]]
-    modes += [dict(name=r, contact=False, face=None, ctype=None, region=r) for r in regions]
+    parents = [dict(name=f"c{j}_{ct}", contact=True, face=j, ctype=ct, region=None)
+               for j in faces for ct in tr["contact_types"]]
+    parents += [dict(name=r, contact=False, face=None, ctype=None, region=r) for r in regions]
+    modes = []
+    for p in parents:
+        for lam in (range(n_lam) if p["contact"] and n_lam > 1 else [None]):
+            for theta in (range(n_theta) if n_theta > 1 else [None]):
+                suffix = ("" if lam is None else f"_lam{lam}") + ("" if theta is None else f"_th{theta}")
+                modes.append(dict(p, name=p["name"] + suffix, base=p["name"], lam=lam, theta=theta))
     return modes
 
 
@@ -152,6 +204,67 @@ def transition_allowed(m, m2):
 def knot_from_pose(pose, r):
     """Knot state (p_x, p_y, c, s, r_x, r_y) from a slider pose (x, y, theta) and a pusher position."""
     return np.array([pose[0], pose[1], math.cos(pose[2]), math.sin(pose[2]), r[0], r[1]], float)
+
+
+# Regions as modes (plan 5.3). theta_splits > 1 copies every mode per angle interval over [-pi, pi);
+# lambda_splits > 1 copies the contact modes per cell of the contact position along the face. A copy
+# refines its parent (tex Prop 3.7): same true model and same cost, on a smaller set. To keep every
+# true step, label each knot by the half-open interval holding its angle: a static step then keeps
+# its label, and a contact step's labels are no further apart than the rotation step bound.
+
+def theta_interval(splits, i):
+    """Closed angle interval (lo, hi) of theta region i."""
+    width = 2.0 * math.pi / splits
+    return -math.pi + i * width, -math.pi + (i + 1) * width
+
+
+def theta_label(theta, splits):
+    """The theta region holding an angle, with half-open intervals."""
+    return min(int(((theta + math.pi) % (2.0 * math.pi)) / (2.0 * math.pi / splits)), splits - 1)
+
+
+def chart_near(theta, center):
+    """theta + 2 pi k closest to center; theta may be an array."""
+    return theta + 2.0 * math.pi * np.round((center - theta) / (2.0 * math.pi))
+
+
+def sector_box(splits, i):
+    """Ranges of cos and sin over theta region i: (c_lo, c_hi, s_lo, s_hi)."""
+    a, b = theta_interval(splits, i)
+    angles = [a, b] + [k * 0.5 * math.pi for k in range(-4, 5) if a <= k * 0.5 * math.pi <= b]
+    c, s = np.cos(angles), np.sin(angles)
+    return float(c.min()), float(c.max()), float(s.min()), float(s.max())
+
+
+def step_allowed(md, m, m2):
+    """Mode graph plus the theta-region rule (plan 5.2.2): a non-contact step keeps its region since the slider is static, and a contact step reaches regions within the rotation step bound."""
+    if not transition_allowed(m, m2):
+        return False
+    if m.get("theta") is None:
+        return True
+    d = abs(m["theta"] - m2["theta"])
+    d = min(d, md["theta_splits"] - d)
+    if not m["contact"]:
+        return d == 0
+    return (d - 1) * 2.0 * math.pi / md["theta_splits"] <= md["theta_step_max"]
+
+
+def goal_allowed(md, m, task):
+    """Whether a goal edge from mode m can hold a true step: the goal angle lies in m's theta region, or for a contact step within the rotation step bound of it."""
+    if m.get("theta") is None:
+        return True
+    a, b = theta_interval(md["theta_splits"], m["theta"])
+    g = chart_near(task["goal"][2], 0.5 * (a + b))
+    return max(a - g, g - b, 0.0) <= (md["theta_step_max"] if m["contact"] else 1e-12)
+
+
+def start_mode_index(md, modes, task):
+    """The start vertex's mode: the start region, in the theta region holding the start angle."""
+    label = theta_label(task["start"][2], md["theta_splits"]) if md["theta_splits"] > 1 else None
+    for i, m in enumerate(modes):
+        if m["base"] == task["start_region"] and m["theta"] == label and not m["contact"]:
+            return i
+    raise ValueError(f"start region {task['start_region']!r} is not a configured non-contact region")
 
 
 # ===== CONSTRAINTS =====
@@ -247,6 +360,27 @@ def contact_state_rows(md, j, ix, iy, tag):
             ("ge", poly_add(const(l), along), f"contact_extent_lo_{tag}")]
 
 
+def theta_rows(md, theta, ic, js, tag):
+    """Angular sector of a theta region as linear rows in (c, s), valid for unit-norm points in the sector (plan 5.3): two half-planes and the chord cut."""
+    a, b = theta_interval(md["theta_splits"], theta)
+    mid, h = 0.5 * (a + b), 0.5 * (b - a)
+    clean = lambda x: 0.0 if abs(x) < 1e-15 else x
+    return [("ge", lin({ic: clean(-math.sin(a)), js: clean(math.cos(a))}), f"theta_lo_{tag}"),
+            ("ge", lin({ic: clean(math.sin(b)), js: clean(-math.cos(b))}), f"theta_hi_{tag}"),
+            ("ge", lin({ic: clean(math.cos(mid)), js: clean(math.sin(mid))}, -clean(math.cos(h))), f"theta_chord_{tag}")]
+
+
+def lambda_rows(md, mode, ix, iy, tag):
+    """Contact position along the face in the mode's lambda cell (plan 5.2.2)."""
+    j = mode["face"]
+    t, c, l = md["tangents"][j], md["centers"][j], md["half_len"][j]
+    width = 2.0 * l / md["lambda_splits"]
+    lo = -l + mode["lam"] * width
+    along = lin({ix: t[0], iy: t[1]}, -(t @ c))
+    return [("ge", poly_add(along, const(-lo)), f"lambda_lo_{tag}"),
+            ("ge", poly_add(const(lo + width), poly_scale(along, -1.0)), f"lambda_hi_{tag}")]
+
+
 def contact_step_rows(md, mode):
     """Rows 3-6 of plan 4.5 for one step in contact on mode['face'] with friction type mode['ctype']."""
     j = mode["face"]
@@ -319,6 +453,15 @@ def edge_constraints(md, task, kind, tail, head):
     rows.append(("ge", poly_add(poly_mul(var(C0), var(C1)), poly_mul(var(S0), var(S1)),
                                 const(-math.cos(md["theta_step_max"]))), "rot_step"))
     rows += contact_step_rows(md, tail) if tail["contact"] else free_step_rows(md, tail)
+    # regions (plan 5.3): the tail's copy holds knot k and the head's copy holds knot k+1
+    if tail.get("theta") is not None:
+        rows += theta_rows(md, tail["theta"], C0, S0, "k0")
+    if head is not None and head.get("theta") is not None:
+        rows += theta_rows(md, head["theta"], C1, S1, "k1")
+    if tail.get("lam") is not None:
+        rows += lambda_rows(md, tail, RX0, RY0, "k0")
+    if head is not None and head.get("lam") is not None:
+        rows += lambda_rows(md, head, RX1, RY1, "k1")
     # 7. pusher speed limit on every edge (body frame, infinity norm)
     for i1, i0, a in ((RX1, RX0, "x"), (RY1, RY0, "y")):
         rows.append(("ge", lin({i1: -1.0, i0: 1.0}, md["v_max"]), f"v_max_{a}_hi"))
@@ -341,13 +484,15 @@ def edge_constraints(md, task, kind, tail, head):
     return rows
 
 
-def edge_box(md, tail):
-    """Variable box of plan 4.5 item 9, before LP tightening; it holds every true point of the edge."""
+def edge_box(md, tail, head=None):
+    """Variable box of plan 4.5 item 9, before LP tightening; it holds every true point of the edge. A theta region narrows (c, s) at its knot (plan 5.3)."""
     lo, hi = np.empty(NV), np.empty(NV)
-    for off in (0, 6):
+    for off, mode in ((0, tail), (6, head)):
         lo[off + 0], hi[off + 0] = md["p_box"][0]
         lo[off + 1], hi[off + 1] = md["p_box"][1]
         lo[off + 2:off + 4], hi[off + 2:off + 4] = -1.0, 1.0
+        if mode is not None and mode.get("theta") is not None:
+            lo[off + 2], hi[off + 2], lo[off + 3], hi[off + 3] = sector_box(md["theta_splits"], mode["theta"])
         lo[off + 4:off + 6], hi[off + 4:off + 6] = -md["r_ws"], md["r_ws"]
     if tail["contact"]:
         tb = md["tau_bound"][tail["face"]]
@@ -357,12 +502,17 @@ def edge_box(md, tail):
     return lo, hi
 
 
+def mode_switch(tail, head):
+    """Whether a step changes mode. Moving between region copies of one mode is no switch (plan 5.3): a true trajectory does not pay for it, so charging it would make the bound invalid."""
+    return head is not None and head.get("base", head["name"]) != tail.get("base", tail["name"])
+
+
 def edge_cost(cfg, tail, head):
     """Quadratic edge cost of plan 4.6 as a polynomial over v (the same for all runs)."""
     w = cfg["costs"]
     diff = lambda a, b: lin({a: 1.0, b: -1.0})
     sq = lambda a, b: poly_mul(diff(a, b), diff(a, b))
-    switch = head is not None and head["name"] != tail["name"]
+    switch = mode_switch(tail, head)
     return poly_add(poly_scale(poly_add(sq(PX1, PX0), sq(PY1, PY0)), w["w_p"]),
                     poly_scale(poly_add(const(2.0), poly_mul(var(C0), var(C1), -2.0), poly_mul(var(S0), var(S1), -2.0)), w["w_theta"]),
                     poly_scale(poly_add(sq(RX1, RX0), sq(RY1, RY0)), w["w_r"]),
@@ -371,8 +521,502 @@ def edge_cost(cfg, tail, head):
 
 
 # ===== RELAXATIONS =====
-# Milestone M1 (plan section 5): the SDP moment relaxation and the Taylor outer model, both
-# built from the constraint table above.
+# Convex outer models of every edge type (plan section 5), both read from the constraint table above:
+# the order-kappa moment relaxation (tex 3.3) and the Taylor model with certified bands (tex 3.2).
+#
+# Both produce the same record, homogeneous in m, with m[0] = y_e the edge flow:
+#   Aeq m = 0 and G m >= 0: sparse rows. The constant of a polynomial row multiplies m[0], so a
+#       moment m_alpha of the constant monomial is the flow and homogenization needs no extra step;
+#   lo m[0] <= m <= hi m[0]: interval bounds per unit flow, with 0 <= m[0] <= 1 on top;
+#   psd: blocks B_b(m) >= 0, each a sparse upper-triangular map (row, col, moment index, coefficient);
+#   soc: run B with cost_model soc only, entries z y >= scale (form m)^2;
+#   c: the linear cost; tail_slots, head_slots: entries of m coupled to the tail and head vertices.
+
+# ----- Moment relaxation (plan 5.1) -----
+
+_BASES = {}
+
+
+def moment_basis(kappa):
+    """Monomials of degree <= 2 kappa in the edge variables, ordered by degree then lexicographically, with their index maps (plan 5.1.1). Cached per order.
+
+    monos: the monomials; index: monomial -> position; upto[d]: how many have degree <= d;
+    times[i, u]: position of v_i * monomial u (deg u < 2 kappa); mat[a, b]: position of monomial a *
+    monomial b (deg a, deg b <= kappa); parent, last: monomial = parent * v_last; exp: exponents.
+    """
+    if kappa in _BASES:
+        return _BASES[kappa]
+    monos, upto = [()], [1]
+    for d in range(1, 2 * kappa + 1):
+        monos += list(itertools.combinations_with_replacement(range(NV), d))
+        upto.append(len(monos))
+    index = {m: i for i, m in enumerate(monos)}
+    n, s, low = len(monos), upto[kappa], upto[2 * kappa - 1]
+    times = np.empty((NV, low), np.int32)
+    for u in range(low):
+        for i in range(NV):
+            times[i, u] = index[tuple(sorted(monos[u] + (i,)))]
+    mat = np.empty((s, s), np.int32)
+    for a in range(s):
+        for b in range(a, s):
+            mat[a, b] = mat[b, a] = index[tuple(sorted(monos[a] + monos[b]))]
+    parent, last, exp = np.zeros(n, np.int32), np.zeros(n, np.int32), np.zeros((n, NV), np.int32)
+    for i in range(1, n):
+        parent[i], last[i] = index[monos[i][:-1]], monos[i][-1]
+        exp[i] = exp[parent[i]]
+        exp[i, last[i]] += 1
+    basis = dict(kappa=kappa, monos=monos, index=index, upto=upto, times=times, mat=mat, parent=parent, last=last, exp=exp)
+    basis["moment_map"] = localizing_map(basis, const(1.0), kappa)
+    _BASES[kappa] = basis
+    return basis
+
+
+def mono_times(basis, k, u):
+    """Positions of monomial k times each monomial in the index array u."""
+    for i in k:
+        u = basis["times"][i, u]
+    return u
+
+
+def rank_one_moments(basis, V):
+    """Moment vectors (n, monomials) of the points V (n, NV): every monomial's value at each point."""
+    M = np.empty((V.shape[0], len(basis["monos"])))
+    M[:, 0] = 1.0
+    upto = basis["upto"]
+    for d in range(1, len(upto)):
+        idx = np.arange(upto[d - 1], upto[d])
+        M[:, idx] = M[:, basis["parent"][idx]] * V[:, basis["last"][idx]]
+    return M
+
+
+def moment_box(basis, lo, hi):
+    """Interval bounds of every monomial over the variable box, per unit flow (plan 5.1.4): interval arithmetic with exact powers, so an even power of a variable that straddles zero starts at zero."""
+    exp = basis["exp"]
+    mlo, mhi = np.ones(exp.shape[0]), np.ones(exp.shape[0])
+    for i in range(NV):
+        nz = np.flatnonzero(exp[:, i])
+        e = exp[nz, i]
+        a, b = float(lo[i]) ** e, float(hi[i]) ** e
+        pl, ph = np.minimum(a, b), np.maximum(a, b)
+        if lo[i] < 0.0 < hi[i]:
+            pl[e % 2 == 0] = 0.0
+        cand = np.stack([mlo[nz] * pl, mlo[nz] * ph, mhi[nz] * pl, mhi[nz] * ph])
+        mlo[nz], mhi[nz] = cand.min(axis=0), cand.max(axis=0)
+    return mlo, mhi
+
+
+def lift_rows(basis, polys, all_multipliers):
+    """Moment rows L_m(p u) of the polynomials: every monomial u with deg(p u) <= 2 kappa when all_multipliers (equalities, plan 5.1.2), else u = 1 only. Returns (csr matrix, source polynomial per row, multiplier monomial per row)."""
+    n, top = len(basis["monos"]), 2 * basis["kappa"]
+    rows, cols, vals, owner, mult = [], [], [], [], []
+    base = 0
+    for pi, p in enumerate(polys):
+        us = np.arange(basis["upto"][top - poly_degree(p)] if all_multipliers else 1)
+        for k, c in p.items():
+            rows.append(base + np.arange(us.size))
+            cols.append(mono_times(basis, k, us))
+            vals.append(np.full(us.size, float(c)))
+        owner.append(np.full(us.size, pi))
+        mult.append(us)
+        base += us.size
+    if not base:
+        return sp.csr_matrix((0, n)), np.zeros(0, np.int64), np.zeros(0, np.int64)
+    A = sp.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(base, n))
+    return A, np.concatenate(owner), np.concatenate(mult)
+
+
+def independent_rows(A, tol=1e-10):
+    """A maximal independent subset of the rows of a small sparse matrix, by pivoted QR on unit-norm rows (plan 5.1.7): the IPM's normal equations need full row rank."""
+    if A.shape[0] == 0:
+        return np.zeros(0, np.int64)
+    d = A.toarray()
+    d /= np.linalg.norm(d, axis=1, keepdims=True)
+    r, piv = scipy.linalg.qr(d.T, mode="r", pivoting=True)
+    diag = np.abs(np.diag(r))
+    return np.sort(piv[:int(np.sum(diag > tol * diag[0]))])
+
+
+def unique_rows(A):
+    """One row per class of rows equal up to scale, by two random projections of the rows scaled to a unit first entry (plan 5.1.7). A hash collision would drop a row and only enlarge the outer set, so it cannot break validity."""
+    if A.shape[0] == 0:
+        return np.zeros(0, np.int64)
+    A = A.copy()
+    A.sort_indices()
+    lead = A.data[A.indptr[:-1]]
+    key = np.round((A @ np.random.default_rng(0).normal(size=(A.shape[1], 2))) / lead[:, None], 9)
+    return np.sort(np.unique(key, axis=0, return_index=True)[1])
+
+
+def localizing_map(basis, p, order):
+    """Sparse upper-triangular map of the localizing matrix M_order(p m), with entry (a, b) = L_m(p u_a u_b): (row, col, moment index, coefficient) as parallel arrays. p = 1 gives the moment matrix."""
+    s = basis["upto"][order]
+    iu, ju = np.triu_indices(s)
+    pairs = basis["mat"][iu, ju]
+    moms = [mono_times(basis, k, pairs) for k in p]
+    return dict(size=s, row=np.tile(iu, len(p)).astype(np.int32), col=np.tile(ju, len(p)).astype(np.int32),
+                mom=np.concatenate(moms).astype(np.int32), coef=np.concatenate([np.full(iu.size, float(c)) for c in p.values()]))
+
+
+def coupled_slots(basis, knot, second_moments):
+    """Positions in m of a knot's coupled coordinates: flow, first moments, then second moments (plan 5.1.5). The same order at both knots, so a head's slots meet the next tail's."""
+    index = basis["index"]
+    slots = [0] + [index[(i,)] for i in knot]
+    if second_moments:
+        slots += [index[(a, b)] for pos, a in enumerate(knot) for b in knot[pos:]]
+    return np.array(slots)
+
+
+def relax_sdp(cfg, md, task, kind, tail, head, lo, hi):
+    """Order-kappa moment relaxation of one edge type (plan 5.1, tex Def 3.4), in the record described at the top of this section."""
+    rx = cfg["relaxation"]
+    kappa = int(rx["order"])
+    basis = moment_basis(kappa)
+    rows = edge_constraints(md, task, kind, tail, head)
+    eq_polys, eq_tags = [p for s, p, _ in rows if s == "eq"], [t for s, _, t in rows if s == "eq"]
+    ge_polys, ge_tags = [p for s, p, _ in rows if s == "ge"], [t for s, _, t in rows if s == "ge"]
+    if kappa >= 2 and rx["ball"]:
+        squares = [poly_mul(var(i), var(i), -1.0) for i in range(NV)]
+        ge_polys.append(poly_add(const(np.sum(np.maximum(lo ** 2, hi ** 2))), *squares))
+        ge_tags.append("ball")
+    psd = [dict(basis["moment_map"], poly=const(1.0), tag="moment")]
+    for p, tag in zip(ge_polys, ge_tags):
+        order = kappa - math.ceil(poly_degree(p) / 2)
+        if order >= 1:
+            psd.append(dict(localizing_map(basis, p, order), poly=p, tag=tag))
+    if rx["rlt"]:
+        linear = [(p, t) for p, t in zip(ge_polys, ge_tags) if poly_degree(p) == 1]
+        for pos, (p, ta) in enumerate(linear):
+            for q, tb in linear[pos:]:
+                ge_polys.append(poly_mul(p, q))
+                ge_tags.append(f"rlt_{ta}_{tb}")
+    raw, owner, _ = lift_rows(basis, eq_polys, True)
+    keep = independent_rows(raw) if kappa == 1 else unique_rows(raw)
+    mlo, mhi = moment_box(basis, lo, hi)
+    n = len(basis["monos"])
+    c = np.zeros(n)
+    for k, w in edge_cost(cfg, tail, head).items():
+        c[basis["index"][k]] += w
+    second = bool(rx["couple_second_moments"])
+    return dict(kind="sdp", kappa=kappa, n=n, Aeq=raw[keep], eq_owner=owner[keep], eq_tags=eq_tags, eq_rows_raw=raw.shape[0],
+                G=lift_rows(basis, ge_polys, False)[0], ge_tags=ge_tags, ge_polys=ge_polys, lo=mlo, hi=mhi, c=c, psd=psd, soc=[], bands={},
+                tail_slots=coupled_slots(basis, KNOT0, second), head_slots=coupled_slots(basis, KNOT1, second))
+
+
+# ----- Taylor model with certified bands (plan 5.2, tex Prop 3.1) -----
+# Run B's edge vector: knot k and knot k+1 with an angle in place of (c, s), the forces, and one
+# epigraph variable per cost term. m = (y, y v), the degree-1 moments of these 20 variables. Rows over
+# them use the same polynomial dicts as above, and a row's constant multiplies y.
+TPX0, TPY0, TTH0, TRX0, TRY0, TPX1, TPY1, TTH1, TRX1, TRY1, TFN, TFT, TTAU = range(13)
+TZ = {name: 13 + i for i, name in enumerate(("dpx", "dpy", "dth", "drx", "dry", "fn", "ft"))}
+NT = 13 + len(TZ)
+TAYLOR_OF_SDP = {PX0: TPX0, PY0: TPY0, RX0: TRX0, RY0: TRY0, PX1: TPX1, PY1: TPY1, RX1: TRX1, RY1: TRY1, FN: TFN, FT: TFT, TAU: TTAU}
+# Table rows that the angle variable makes redundant. Rows tagged theta_* become the angle's box.
+TAYLOR_IMPLIED = {"unit_norm_0", "unit_norm_1", "static_s", "start_s0", "goal_s1"}
+
+
+def taylor_charts(md, task, kind, tail, head):
+    """Angle charts of one Taylor edge (plan 5.2.2): each vertex keeps theta in its own region's chart, and `wrap` (a multiple of 2 pi) makes theta_1 + wrap - theta_0 the true step when the regions straddle the +-pi cut. A goal edge keeps the goal angle in the tail's chart."""
+    splits = md["theta_splits"]
+    if splits < 3:
+        raise ValueError("the Taylor model needs relaxation.regions.theta_splits >= 3, so that a pair of regions has one way around the circle")
+    lo0, hi0 = theta_interval(splits, tail["theta"])
+    th0, h = 0.5 * (lo0 + hi0), 0.5 * (hi0 - lo0)
+    if kind == "goal":
+        th1 = float(chart_near(task["goal"][2], th0))
+        return dict(th0=th0, h=h, lo0=lo0, hi0=hi0, th1=th1, lo1=th1, hi1=th1, wrap=0.0)
+    lo1, hi1 = theta_interval(splits, head["theta"])
+    th1 = 0.5 * (lo1 + hi1)
+    return dict(th0=th0, h=h, lo0=lo0, hi0=hi0, th1=th1, lo1=lo1, hi1=hi1, wrap=float(chart_near(th1, th0) - th1))
+
+
+def taylor_dtheta(ch):
+    """The angle step theta_1 + wrap - theta_0 as a polynomial."""
+    return poly_add(var(TTH1), var(TTH0, -1.0), const(ch["wrap"]))
+
+
+def force_box(md, tail, lo, hi):
+    """Body-frame force (f_x, f_y) on a contact edge as linear forms over (f_n, f_t), with its center and radius over the edge box."""
+    j = tail["face"]
+    n, t = md["normals"][j], md["tangents"][j]
+    fn_c, fn_r = 0.5 * (lo[FN] + hi[FN]), 0.5 * (hi[FN] - lo[FN])
+    ft_c, ft_r = 0.5 * (lo[FT] + hi[FT]), 0.5 * (hi[FT] - lo[FT])
+    return dict(fx=lin({TFN: -n[0], TFT: t[0]}), fy=lin({TFN: -n[1], TFT: t[1]}),
+                fx_c=-n[0] * fn_c + t[0] * ft_c, fx_r=abs(n[0]) * fn_r + abs(t[0]) * ft_r,
+                fy_c=-n[1] * fn_c + t[1] * ft_c, fy_r=abs(n[1]) * fn_r + abs(t[1]) * ft_r)
+
+
+def translation_bands(f, th, h):
+    """Bands of (cos f_x - sin f_y, sin f_x + cos f_y) around their first-order model at the region center: the remainder h^2 / 2 times the force bound, plus the cross term h times the force radius. The cross term is first order in h (tex Remark 3.2)."""
+    c, s = abs(math.cos(th)), abs(math.sin(th))
+    rem = 0.5 * h * h * (abs(f["fx_c"]) + f["fx_r"] + abs(f["fy_c"]) + f["fy_r"])
+    return rem + h * (s * f["fx_r"] + c * f["fy_r"]), rem + h * (c * f["fx_r"] + s * f["fy_r"])
+
+
+def mccormick(a, alo, ahi, b, blo, bhi, a_err=0.0):
+    """McCormick under- and over-estimators of a * b, for linear forms b in [blo, bhi] and a in [alo, ahi], as affine polynomials. a may be a first-order model of the true factor with error at most a_err: the error enters through the bound of b that multiplies it."""
+    under = [poly_add(poly_scale(b, alo), poly_scale(a, blo), const(-alo * blo - abs(blo) * a_err)),
+             poly_add(poly_scale(b, ahi), poly_scale(a, bhi), const(-ahi * bhi - abs(bhi) * a_err))]
+    over = [poly_add(poly_scale(b, alo), poly_scale(a, bhi), const(-alo * bhi + abs(bhi) * a_err)),
+            poly_add(poly_scale(b, ahi), poly_scale(a, blo), const(-ahi * blo + abs(blo) * a_err))]
+    return under, over
+
+
+def taylor_translation(md, tail, ch, lo, hi, mode):
+    """Rows of p_1 - p_0 = k R(theta_0) f. Returns (bands as (tag, affine, width), plain ge rows as (poly, tag))."""
+    f = force_box(md, tail, lo, hi)
+    k_tr = md["dt"] * md["c_v"] / md["f_max"] ** 2
+    th, h = ch["th0"], ch["h"]
+    c, s = math.cos(th), math.sin(th)
+    dx, dy = lin({TPX1: 1.0, TPX0: -1.0}), lin({TPY1: 1.0, TPY0: -1.0})
+    d0 = lin({TTH0: 1.0}, -th)
+    if mode == "band":
+        phi_x = poly_add(poly_scale(f["fx"], c), poly_scale(f["fy"], -s), poly_scale(d0, -s * f["fx_c"] - c * f["fy_c"]))
+        phi_y = poly_add(poly_scale(f["fx"], s), poly_scale(f["fy"], c), poly_scale(d0, c * f["fx_c"] - s * f["fy_c"]))
+        ex, ey = translation_bands(f, th, h)
+        return [("trans_x", poly_add(dx, poly_scale(phi_x, -k_tr)), k_tr * ex),
+                ("trans_y", poly_add(dy, poly_scale(phi_y, -k_tr)), k_tr * ey)], []
+    c_lo, c_hi, s_lo, s_hi = sector_box(md["theta_splits"], tail["theta"])
+    cos_lin, sin_lin = poly_add(const(c), poly_scale(d0, -s)), poly_add(const(s), poly_scale(d0, c))
+    err = 0.5 * h * h
+    fx_lo, fx_hi, fy_lo, fy_hi = f["fx_c"] - f["fx_r"], f["fx_c"] + f["fx_r"], f["fy_c"] - f["fy_r"], f["fy_c"] + f["fy_r"]
+    cfx_u, cfx_o = mccormick(cos_lin, c_lo, c_hi, f["fx"], fx_lo, fx_hi, err)
+    sfy_u, sfy_o = mccormick(sin_lin, s_lo, s_hi, f["fy"], fy_lo, fy_hi, err)
+    sfx_u, sfx_o = mccormick(sin_lin, s_lo, s_hi, f["fx"], fx_lo, fx_hi, err)
+    cfy_u, cfy_o = mccormick(cos_lin, c_lo, c_hi, f["fy"], fy_lo, fy_hi, err)
+    minus = lambda a, b: poly_add(a, poly_scale(b, -1.0))
+    rows = []
+    for a, b in itertools.product(cfx_u, sfy_o):       # phi_x = C f_x - S f_y >= under - over
+        rows.append((minus(dx, poly_scale(minus(a, b), k_tr)), "trans_x_mc_lo"))
+    for a, b in itertools.product(cfx_o, sfy_u):       # phi_x <= over - under
+        rows.append((minus(poly_scale(minus(a, b), k_tr), dx), "trans_x_mc_hi"))
+    for a, b in itertools.product(sfx_u, cfy_u):       # phi_y = S f_x + C f_y >= under + under
+        rows.append((minus(dy, poly_scale(poly_add(a, b), k_tr)), "trans_y_mc_lo"))
+    for a, b in itertools.product(sfx_o, cfy_o):       # phi_y <= over + over
+        rows.append((minus(poly_scale(poly_add(a, b), k_tr), dy), "trans_y_mc_hi"))
+    return [], rows
+
+
+def taylor_torque(md, tail, lo, hi, mode):
+    """Rows of the torque. On face j, with contact position lambda = t_j^T (r_c - c_j) and r_c on the face, tau = |c_j| f_t + lambda f_n: exactly one bilinear term. Returns (bands, plain ge rows) as in taylor_translation."""
+    j = tail["face"]
+    t, c = md["tangents"][j], md["centers"][j]
+    lam = lin({TRX0: t[0], TRY0: t[1]}, -(t @ c))
+    ends = [(a * lo[i], a * hi[i]) for a, i in ((t[0], RX0), (t[1], RY0))]
+    lam_lo, lam_hi = sum(min(e) for e in ends) - t @ c, sum(max(e) for e in ends) - t @ c
+    w = lin({TTAU: 1.0, TFT: -float(np.linalg.norm(c))})           # w = tau - |c_j| f_t = lambda f_n
+    if mode == "band":
+        lam_c, lam_r = 0.5 * (lam_lo + lam_hi), 0.5 * (lam_hi - lam_lo)
+        fn_c, fn_r = 0.5 * (lo[FN] + hi[FN]), 0.5 * (hi[FN] - lo[FN])
+        return [("torque", poly_add(w, var(TFN, -lam_c), poly_scale(lam, -fn_c), const(lam_c * fn_c)), lam_r * fn_r)], []
+    under, over = mccormick(lam, lam_lo, lam_hi, var(TFN), lo[FN], hi[FN])
+    return [], [(poly_add(w, poly_scale(u, -1.0)), "torque_mc_lo") for u in under] + [(poly_add(o, poly_scale(w, -1.0)), "torque_mc_hi") for o in over]
+
+
+def taylor_rows(cfg, md, task, kind, tail, head, lo, hi):
+    """Rows of one Taylor edge type: (eq rows, ge rows, band widths), rows as (poly, tag). It reads the constraint table row by row, so the model cannot drift from it, and a row with no Taylor form raises."""
+    mode = cfg["relaxation"]["taylor_mode"]
+    if mode not in ("band", "mccormick"):
+        raise ValueError(f"unknown relaxation.taylor_mode {mode!r}")
+    ch = taylor_charts(md, task, kind, tail, head)
+    theta_max = md["theta_step_max"]
+    dth = taylor_dtheta(ch)
+    eq, ge, bands = [], [], {}
+
+    def add_bands(items):
+        for tag, affine, width in items:
+            ge.append((poly_add(affine, const(width)), f"{tag}_lo"))
+            ge.append((poly_add(poly_scale(affine, -1.0), const(width)), f"{tag}_hi"))
+            bands[tag] = float(width)
+
+    for sense, p, tag in edge_constraints(md, task, kind, tail, head):
+        if tag in TAYLOR_IMPLIED or tag.startswith("theta_") or tag == "trans_y":
+            continue                                               # trans_y comes with trans_x
+        if tag == "rot_rel":                                       # |dtheta - dt omega| <= max |asin u - u|
+            k_rot = md["dt"] * md["c_v"] / md["tau_max"] ** 2
+            add_bands([(tag, poly_add(dth, var(TTAU, -k_rot)), theta_max - math.sin(theta_max))])
+        elif tag == "rot_step":
+            ge.append((poly_add(const(theta_max), dth), "rot_step_lo"))
+            ge.append((poly_add(const(theta_max), poly_scale(dth, -1.0)), "rot_step_hi"))
+        elif tag == "static_c":
+            eq.append((lin({TTH1: 1.0, TTH0: -1.0}), tag))
+        elif tag == "start_c0":
+            eq.append((lin({TTH0: 1.0}, -float(chart_near(task["start"][2], ch["th0"]))), tag))
+        elif tag == "goal_c1":
+            eq.append((lin({TTH1: 1.0}, -ch["th1"]), tag))
+        elif tag == "trans_x":
+            items, plain = taylor_translation(md, tail, ch, lo, hi, mode)
+            add_bands(items)
+            ge += plain
+        elif tag == "torque":
+            items, plain = taylor_torque(md, tail, lo, hi, mode)
+            add_bands(items)
+            ge += plain
+        else:
+            mapped = {}
+            for k, c in p.items():
+                if len(k) > 1 or (k and k[0] not in TAYLOR_OF_SDP):
+                    raise ValueError(f"table row {tag!r} has no Taylor form")
+                mapped[(TAYLOR_OF_SDP[k[0]],) if k else ()] = c
+            (eq if sense == "eq" else ge).append((mapped, tag))
+    return eq, ge, bands
+
+
+def taylor_cost(cfg, md, tail, lo, hi, dth):
+    """Epigraph rows of run B's cost (plan 5.2.4): tangent planes of each quadratic term, or SOC entries with cost_model soc. Returns (ge rows, soc entries, upper bound per term, weight per term)."""
+    w, rx = cfg["costs"], cfg["relaxation"]
+    if rx["cost_model"] not in ("tangent_planes", "soc"):
+        raise ValueError(f"unknown relaxation.cost_model {rx['cost_model']!r}")
+    use_soc, planes = rx["cost_model"] == "soc", int(rx["cost_planes"])
+    dp_max, dth_max = 0.0, 0.0
+    if tail["contact"]:                                            # |dp_x|, |dp_y| <= k ||f||, since R is a rotation
+        f = force_box(md, tail, lo, hi)
+        dp_max = md["dt"] * md["c_v"] / md["f_max"] ** 2 * math.hypot(abs(f["fx_c"]) + f["fx_r"], abs(f["fy_c"]) + f["fy_r"])
+        dth_max = md["theta_step_max"]
+    vm = md["v_max"]
+    squares = [("dpx", lin({TPX1: 1.0, TPX0: -1.0}), -dp_max, dp_max, w["w_p"]), ("dpy", lin({TPY1: 1.0, TPY0: -1.0}), -dp_max, dp_max, w["w_p"]),
+               ("drx", lin({TRX1: 1.0, TRX0: -1.0}), -vm, vm, w["w_r"]), ("dry", lin({TRY1: 1.0, TRY0: -1.0}), -vm, vm, w["w_r"]),
+               ("fn", var(TFN), lo[FN], hi[FN], w["w_f"]), ("ft", var(TFT), lo[FT], hi[FT], w["w_f"])]
+    ge, soc, ub, weight = [], [], {}, {}
+    for name, x, a, b, wt in squares:
+        ub[name], weight[name] = max(a * a, b * b), wt
+        if a == 0.0 and b == 0.0:
+            continue                                               # pinned at zero by the box
+        if use_soc:
+            soc.append(dict(z=TZ[name], form=x, scale=1.0))
+        else:                                                      # z >= 2 g x - g^2
+            ge += [(poly_add(var(TZ[name]), poly_scale(x, -2.0 * g), const(g * g)), f"plane_{name}") for g in np.linspace(a, b, planes)]
+    # 2 (1 - cos dtheta) is convex on |dtheta| <= pi / 2, which covers the step bound
+    ub["dth"], weight["dth"] = 2.0 * (1.0 - math.cos(dth_max)), w["w_theta"]
+    if dth_max > 0.0:
+        if use_soc:                                                # (1 - cos x) / x^2 falls with |x|, so this underestimates
+            soc.append(dict(z=TZ["dth"], form=dth, scale=ub["dth"] / dth_max ** 2))
+        else:                                                      # z >= f(g) + f'(g) (dtheta - g)
+            ge += [(poly_add(var(TZ["dth"]), poly_scale(dth, -2.0 * math.sin(g)), const(-2.0 * (1.0 - math.cos(g)) + 2.0 * g * math.sin(g))), "plane_dth")
+                   for g in np.linspace(-dth_max, dth_max, planes)]
+    return ge, soc, ub, weight
+
+
+def taylor_matrix(polys):
+    """Sparse rows over m = (y, v): variable i is column i + 1, and a row's constant multiplies y (column 0)."""
+    if not polys:
+        return sp.csr_matrix((0, NT + 1))
+    rows, cols, vals = [], [], []
+    for r, p in enumerate(polys):
+        for k, c in p.items():
+            rows.append(r)
+            cols.append(k[0] + 1 if k else 0)
+            vals.append(float(c))
+    return sp.csr_matrix((vals, (rows, cols)), shape=(len(polys), NT + 1))
+
+
+def relax_taylor(cfg, md, task, kind, tail, head, lo, hi):
+    """Polyhedral outer model of one edge type (plan 5.2), in the record described at the top of this section."""
+    eq, ge, bands = taylor_rows(cfg, md, task, kind, tail, head, lo, hi)
+    ch = taylor_charts(md, task, kind, tail, head)
+    planes, soc, ub, weight = taylor_cost(cfg, md, tail, lo, hi, taylor_dtheta(ch))
+    ge = ge + planes
+    raw = taylor_matrix([p for p, _ in eq])
+    keep = independent_rows(raw)
+    n = NT + 1
+    mlo, mhi = np.ones(n), np.ones(n)
+    for s, t in TAYLOR_OF_SDP.items():
+        mlo[t + 1], mhi[t + 1] = lo[s], hi[s]
+    pad = float(cfg["pruning"]["box_margin"])
+    mlo[TTH0 + 1], mhi[TTH0 + 1] = ch["lo0"] - pad, ch["hi0"] + pad
+    mlo[TTH1 + 1], mhi[TTH1 + 1] = ch["lo1"] - pad, ch["hi1"] + pad
+    c = np.zeros(n)
+    c[0] = cfg["costs"]["w_switch"] if mode_switch(tail, head) else 0.0
+    for name, z in TZ.items():
+        mlo[z + 1], mhi[z + 1] = 0.0, ub[name]
+        c[z + 1] = weight[name]
+    slots = lambda ids: np.array([0] + [i + 1 for i in ids])
+    return dict(kind="taylor", n=n, Aeq=raw[keep], eq_owner=keep, eq_tags=[t for _, t in eq], eq_rows_raw=raw.shape[0],
+                G=taylor_matrix([p for p, _ in ge]), ge_tags=[t for _, t in ge], ge_polys=[p for p, _ in ge], lo=mlo, hi=mhi, c=c, psd=[],
+                soc=[dict(s, form=taylor_matrix([s["form"]])) for s in soc], bands=bands,
+                tail_slots=slots((TPX0, TPY0, TTH0, TRX0, TRY0)), head_slots=slots((TPX1, TPY1, TTH1, TRX1, TRY1)))
+
+
+def taylor_points(md, task, kind, tail, head, V):
+    """Edge-layout points V as Taylor vectors at y = 1: the angle in the edge's charts and each epigraph variable at its true value."""
+    ch = taylor_charts(md, task, kind, tail, head)
+    M = np.zeros((V.shape[0], NT + 1))
+    M[:, 0] = 1.0
+    for s, t in TAYLOR_OF_SDP.items():
+        M[:, t + 1] = V[:, s]
+    M[:, TTH0 + 1] = chart_near(np.arctan2(V[:, S0], V[:, C0]), ch["th0"])
+    M[:, TTH1 + 1] = chart_near(np.arctan2(V[:, S1], V[:, C1]), ch["th1"])
+    true = dict(dpx=(V[:, PX1] - V[:, PX0]) ** 2, dpy=(V[:, PY1] - V[:, PY0]) ** 2,
+                dth=2.0 * (1.0 - V[:, C0] * V[:, C1] - V[:, S0] * V[:, S1]),
+                drx=(V[:, RX1] - V[:, RX0]) ** 2, dry=(V[:, RY1] - V[:, RY0]) ** 2, fn=V[:, FN] ** 2, ft=V[:, FT] ** 2)
+    for name, z in TZ.items():
+        M[:, z + 1] = true[name]
+    return M
+
+
+def worst_bands(md, theta_splits, lambda_splits):
+    """Largest Taylor bands at given split counts, over every face and theta region on the full force box: (translation in m, torque in N m, rotation in rad). The rotation band does not depend on the regions."""
+    k_tr = md["dt"] * md["c_v"] / md["f_max"] ** 2
+    h = math.pi / theta_splits
+    e_tr, e_tau = 0.0, 0.0
+    for j in range(4):
+        tail = dict(contact=True, face=j)
+        lo, hi = edge_box(md, tail)
+        f = force_box(md, tail, lo, hi)
+        for i in range(theta_splits):
+            e_tr = max(e_tr, k_tr * max(translation_bands(f, sum(theta_interval(theta_splits, i)) * 0.5, h)))
+        e_tau = max(e_tau, md["half_len"][j] / lambda_splits * 0.5 * (hi[FN] - lo[FN]))
+    return e_tr, float(e_tau), md["theta_step_max"] - math.sin(md["theta_step_max"])
+
+
+def size_regions(md, target):
+    """Smallest split counts whose bands meet the targets (plan 5.3, tex Cor 3.3), computed offline: (theta_splits, lambda_splits), with None where max_splits is not enough."""
+    limit = int(target["max_splits"])
+    theta = next((s for s in range(3, limit + 1) if worst_bands(md, s, 1)[0] <= float(target["trans"])), None)
+    lam = next((s for s in range(1, limit + 1) if worst_bands(md, 3, s)[1] <= float(target["torque"])), None)
+    return theta, lam
+
+
+def band_widths(cfg, md, modes, task, tr):
+    """Every band of the instance's alive edge types, per tag: {tag: list of widths}."""
+    widths = {}
+    for ti in np.flatnonzero(tr["type_alive"]):
+        tail, head = type_modes(tr, modes, ti)
+        bands = taylor_rows(cfg, md, task, EDGE_KINDS[int(tr["type_kind"][ti])], tail, head, tr["type_lo"][ti], tr["type_hi"][ti])[2]
+        for tag, width in bands.items():
+            widths.setdefault(tag, []).append(width)
+    return widths
+
+
+def band_report(cfg, md, modes, task, tr):
+    """Prints every band width of the run's edge types and the region sizing table (plan 5.2.3, 5.3). Halving h halves the translation band: the bilinear cross term is first order in the region size (tex Remark 3.2)."""
+    print(f"\nTaylor bands at theta_splits {md['theta_splits']}, lambda_splits {md['lambda_splits']} (width over the alive edge types)")
+    for tag, w in sorted(band_widths(cfg, md, modes, task, tr).items()):
+        print(f"  {tag:10s} min {min(w):.3e}  max {max(w):.3e}  ({len(w)} edge types)")
+    print("region sizing, worst case over faces and regions on the full force box")
+    prev = None
+    for s in (4, 8, 16, 32, 64, 128, 256):
+        e = worst_bands(md, s, 1)[0]
+        print(f"  theta_splits {s:4d}: translation band {e:.3e} m" + ("" if prev is None else f"   (x{e / prev:.2f} of the previous row)"))
+        prev = e
+    for s in (1, 2, 4, 8, 16):
+        print(f"  lambda_splits {s:3d}: torque band {worst_bands(md, 3, s)[1]:.3e} N m")
+    print(f"  rotation band {worst_bands(md, 3, 1)[2]:.3e} rad at any split count")
+    target = cfg["relaxation"]["size_regions"]
+    print(f"  smallest splits for trans <= {target['trans']} m and torque <= {target['torque']} N m: {size_regions(md, target)}", flush=True)
+
+
+def relax_edge_type(cfg, md, task, modes, tr, ti):
+    """The outer model of edge type ti under cfg's relaxation."""
+    tail, head = type_modes(tr, modes, ti)
+    builder = {"sdp": relax_sdp, "taylor": relax_taylor}[cfg["relaxation"]["type"]]
+    return builder(cfg, md, task, EDGE_KINDS[int(tr["type_kind"][ti])], tail, head, tr["type_lo"][ti], tr["type_hi"][ti])
+
+
+def lift_points(rel, md, task, kind, tail, head, V):
+    """Lifted vectors m (n, rel['n']) at y = 1 of edge-layout points V (n, NV)."""
+    if rel["kind"] == "sdp":
+        return rank_one_moments(moment_basis(rel["kappa"]), V)
+    return taylor_points(md, task, kind, tail, head, V)
 
 
 # ===== TRUE MODEL =====
@@ -409,6 +1053,169 @@ def violations(rows, v, lo=None, hi=None):
     return out
 
 
+def poly_eval_batch(p, V):
+    """Values of a polynomial at points V (n, nv)."""
+    out = np.zeros(V.shape[0])
+    for k, c in p.items():
+        term = c
+        for i in k:
+            term = term * V[:, i]
+        out = out + term
+    return out
+
+
+def biased_uniform(rng, n, a, b, p_end=0.2):
+    """Uniform draws on [a, b], with a share exactly at the ends so that samples also test rows at their boundary."""
+    x = rng.uniform(a, b, n)
+    ends = rng.random(n) < p_end
+    x[ends] = np.where(rng.random(int(ends.sum())) < 0.5, a, b)
+    return x
+
+
+def contact_wrench_batch(md, face, r0, fn, ft):
+    """Body-frame force on the slider and its torque about the centroid, for pusher centers r0 (n, 2) on `face`: (f_x, f_y, tau)."""
+    n, t = md["normals"][face], md["tangents"][face]
+    fx, fy = -fn * n[0] + ft * t[0], -fn * n[1] + ft * t[1]
+    rcx, rcy = r0[:, 0] - md["rp"] * n[0], r0[:, 1] - md["rp"] * n[1]
+    return fx, fy, rcx * fy - rcy * fx
+
+
+def sample_contact_forces(md, tail, r0, rng):
+    """Forces of true contact steps at pusher centers r0, scaled down where the rotation step would pass its bound (half of those land exactly on it). Returns (f_n, f_t, tau, f_x, f_y, dtheta)."""
+    n = r0.shape[0]
+    mu, limit = md["mu_c"], math.sin(md["theta_step_max"])
+    k_rot = md["dt"] * md["c_v"] / md["tau_max"] ** 2
+    fn = biased_uniform(rng, n, 0.0, md["fn_max"])
+    if tail["ctype"] == "stick":
+        ft = mu * fn * biased_uniform(rng, n, -1.0, 1.0)
+    else:
+        ft = mu * fn * (1.0 if tail["ctype"] == "slide_pos" else -1.0)
+    fx, fy, tau = contact_wrench_batch(md, tail["face"], r0, fn, ft)
+    u = np.abs(k_rot * tau)
+    over = u > limit
+    scale = np.ones(n)
+    scale[over] = limit / u[over] * np.where(rng.random(int(over.sum())) < 0.5, 1.0, rng.random(int(over.sum())))
+    fn, ft, tau, fx, fy = fn * scale, ft * scale, tau * scale, fx * scale, fy * scale
+    return fn, ft, tau, fx, fy, np.arcsin(np.clip(k_rot * tau, -limit, limit))
+
+
+PUSHER_VARS = (RX0, RY0, RX1, RY1)
+
+
+def pusher_polytope_vertices(rows, lo, hi, tol=1e-10):
+    """All vertices of the polytope of (r_k, r_{k+1}) cut out by the table's linear pusher rows and the box, or None if it is empty. Enumerated directly: a 4-D polytope with a few dozen rows has few candidate corners."""
+    pos = {v: i for i, v in enumerate(PUSHER_VARS)}
+    a_eq, b_eq, a_ub, b_ub = [], [], [], []
+    for sense, p, _ in rows:
+        terms = [k for k in p if k]
+        if poly_degree(p) != 1 or any(k[0] not in pos for k in terms):
+            continue
+        a = np.zeros(4)
+        for k in terms:
+            a[pos[k[0]]] = p[k]
+        if sense == "eq":
+            a_eq.append(a)
+            b_eq.append(-p.get((), 0.0))
+        else:                                   # a x + c0 >= 0  <=>  -a x <= c0
+            a_ub.append(-a)
+            b_ub.append(p.get((), 0.0))
+    for i, v in enumerate(PUSHER_VARS):
+        e = np.eye(4)[i]
+        a_ub += [e, -e]
+        b_ub += [hi[v], -lo[v]]
+    a_ub, b_ub = np.array(a_ub), np.array(b_ub)
+    x0, z = np.zeros(4), np.eye(4)              # x = x0 + z y satisfies the equalities
+    if a_eq:
+        a_eq, b_eq = np.array(a_eq), np.array(b_eq)
+        x0 = np.linalg.lstsq(a_eq, b_eq, rcond=None)[0]
+        if np.max(np.abs(a_eq @ x0 - b_eq)) > 1e-9:
+            return None
+        _, s, vt = np.linalg.svd(a_eq)
+        z = vt[int(np.sum(s > 1e-10)):].T
+    if z.shape[1] == 0:
+        return x0[None] if np.all(a_ub @ x0 <= b_ub + tol) else None
+    ay, by = a_ub @ z, b_ub - a_ub @ x0
+    moving = np.linalg.norm(ay, axis=1) > 1e-12
+    if np.any(by[~moving] < -tol):
+        return None
+    subsets = np.array(list(itertools.combinations(np.flatnonzero(moving), z.shape[1])))
+    systems = ay[subsets]
+    good = np.abs(np.linalg.det(systems)) > 1e-10
+    y = np.linalg.solve(systems[good], by[subsets[good]][..., None])[..., 0]
+    y = y[np.all(y @ ay.T <= by + tol, axis=1)]
+    if not y.shape[0]:
+        return None
+    x = x0 + y @ z.T
+    return x[np.unique(np.round(x, 10), axis=0, return_index=True)[1]]
+
+
+def sample_true_steps(md, task, kind, tail, head, n, rng, max_rounds=60):
+    """True points of one edge type (plan 5.4), as an array (m, NV) with m <= n.
+
+    Pusher paths are mixtures of the vertices of the table's pusher polytope, with a share at the
+    vertices themselves. Forces, rotation and translation come from the true model, not from the
+    polynomial table, so the table and its relaxations are checked against independent values.
+    Draws that miss the edge's theta regions or the workspace are rejected.
+    """
+    rows = edge_constraints(md, task, kind, tail, head)
+    lo, hi = edge_box(md, tail, head)
+    verts = pusher_polytope_vertices(rows, lo, hi)
+    if verts is None:
+        return np.zeros((0, NV))
+    splits = md["theta_splits"]
+    labelled = tail.get("theta") is not None
+    a0, b0 = theta_interval(splits, tail["theta"]) if labelled else (-math.pi, math.pi)
+    center = 0.5 * (a0 + b0)
+    a1, b1 = -np.inf, np.inf
+    if head is not None and head.get("theta") is not None:      # the head's interval, in the tail's chart
+        a1, b1 = theta_interval(splits, head["theta"])
+        shift = float(chart_near(0.5 * (a1 + b1), center)) - 0.5 * (a1 + b1)
+        a1, b1 = a1 + shift, b1 + shift
+    k_tr = md["dt"] * md["c_v"] / md["f_max"] ** 2
+    px, py = md["p_box"]
+    tol = 1e-12
+    got, count = [], 0
+    for _ in range(max_rounds):
+        need = n - count
+        if need <= 0:
+            break
+        w = rng.dirichlet(np.full(verts.shape[0], 0.3), need)
+        pure = rng.random(need) < 0.1
+        w[pure] = np.eye(verts.shape[0])[rng.integers(verts.shape[0], size=int(pure.sum()))]
+        r = w @ verts
+        if tail["contact"]:
+            fn, ft, tau, fx, fy, dth = sample_contact_forces(md, tail, r[:, :2], rng)
+        else:
+            fn = ft = tau = fx = fy = dth = np.zeros(need)
+        if kind == "start":
+            th0 = np.full(need, float(chart_near(task["start"][2], center)))
+        elif kind == "goal":
+            th0 = float(chart_near(task["goal"][2], center)) - dth
+        else:
+            low, up = np.maximum(a0, a1 - dth), np.minimum(b0, b1 - dth)
+            th0 = low + (up - low) * rng.random(need)
+        th1 = th0 + dth
+        ok = (th1 >= a1 - tol) & (th1 <= b1 + tol)
+        if labelled:
+            ok &= (th0 >= a0 - tol) & (th0 <= b0 + tol)
+        c0, s0, c1, s1 = np.cos(th0), np.sin(th0), np.cos(th1), np.sin(th1)
+        dpx, dpy = k_tr * (c0 * fx - s0 * fy), k_tr * (s0 * fx + c0 * fy)
+        if kind == "start":
+            p0x, p0y = np.full(need, task["start"][0]), np.full(need, task["start"][1])
+            p1x, p1y = p0x + dpx, p0y + dpy
+        elif kind == "goal":
+            p1x, p1y = np.full(need, task["goal"][0]), np.full(need, task["goal"][1])
+            p0x, p0y = p1x - dpx, p1y - dpy
+        else:
+            p0x, p0y = biased_uniform(rng, need, px[0], px[1]), biased_uniform(rng, need, py[0], py[1])
+            p1x, p1y = p0x + dpx, p0y + dpy
+        ok &= (p0x >= px[0]) & (p0x <= px[1]) & (p0y >= py[0]) & (p0y <= py[1])
+        ok &= (p1x >= px[0]) & (p1x <= px[1]) & (p1y >= py[0]) & (p1y <= py[1])
+        got.append(np.column_stack([p0x, p0y, c0, s0, r[:, 0], r[:, 1], p1x, p1y, c1, s1, r[:, 2], r[:, 3], fn, ft, tau])[ok])
+        count += got[-1].shape[0]
+    return np.vstack(got)[:n] if got else np.zeros((0, NV))
+
+
 def hand_push(cfg, md, task, modes):
     """Scripted start->goal push for a straight push along +x (task T1): approach face 2 at its center inside the start strip, then stick-push with a constant normal force.
 
@@ -421,8 +1228,11 @@ def hand_push(cfg, md, task, modes):
         raise ValueError("the hand push is scripted only for straight pushes along +x at zero rotation (T1)")
     if task["start_region"] != "strip_2":
         raise ValueError("the hand push starts in strip_2")
-    by_name = {m["name"]: m for m in modes}
-    strip, stick, j = by_name["strip_2"], by_name["c2_stick"], 2
+    # with regions: the copies holding zero rotation and the face's center
+    label = theta_label(s0[2], md["theta_splits"]) if md["theta_splits"] > 1 else None
+    cell = md["lambda_splits"] // 2 if md["lambda_splits"] > 1 else None
+    pick = lambda base, lam: next(m for m in modes if m["base"] == base and m["theta"] == label and m["lam"] == lam)
+    strip, stick, j = pick("strip_2", None), pick("c2_stick", cell), 2
     contact_r = md["centers"][j] + md["rp"] * md["normals"][j]
     r0 = task["pusher_start"]
     n_app = max(1, math.ceil(float(np.max(np.abs(contact_r - r0))) / md["v_max"] - 1e-12))
@@ -443,6 +1253,157 @@ def hand_push(cfg, md, task, modes):
     return steps
 
 
+# ===== VALIDITY =====
+# Plan 5.4. Every true point must satisfy every row, bound and PSD block of its edge's outer model.
+# A violation is a bug that would make the certified bound invalid, so a build stops on one.
+
+def relaxation_violations(rel, M):
+    """Largest violation per row class at lifted points M (n, len m), as {class: (value, where)}; 0 means satisfied."""
+    out = {}
+    if rel["Aeq"].shape[0]:
+        r = np.max(np.abs(rel["Aeq"] @ M.T), axis=1)
+        i = int(np.argmax(r))
+        out["eq"] = (float(r[i]), rel["eq_tags"][int(rel["eq_owner"][i])])
+    if rel["G"].shape[0]:
+        r = np.max(-(rel["G"] @ M.T), axis=1)
+        i = int(np.argmax(r))
+        out["ge"] = (max(float(r[i]), 0.0), rel["ge_tags"][i])
+    y = M[:, :1]
+    r = np.maximum(np.max(rel["lo"] * y - M, axis=0), np.max(M - rel["hi"] * y, axis=0))
+    i = int(np.argmax(r))
+    out["box"] = (max(float(r[i]), 0.0), f"m[{i}]")
+    for s in rel["soc"]:
+        form = (s["form"] @ M.T).ravel()
+        value = float(np.max(s["scale"] * form ** 2 - M[:, s["z"] + 1] * M[:, 0]))
+        if value > out.get("soc", (0.0, ""))[0]:
+            out["soc"] = (value, f"z[{s['z']}]")
+    return out
+
+
+def block_operator(block, n):
+    """(sparse operator from moment vectors to the block's upper-triangle entries, entry rows, entry columns)."""
+    s = int(block["size"])
+    uniq, inv = np.unique(block["row"].astype(np.int64) * s + block["col"], return_inverse=True)
+    rows, cols = np.divmod(uniq, s)
+    return sp.csr_matrix((block["coef"], (inv.ravel(), block["mom"])), shape=(uniq.size, n)), rows, cols
+
+
+def block_identity_error(block, op, M, V):
+    """Largest entry error, per point, of the rank-one identity B(m(v)) = g(v) w w^T, with w the block's monomials. Also returns the entries (n, entries) and g(v)."""
+    mat, rows, cols = op
+    vals = (mat @ M.T).T
+    g = poly_eval_batch(block["poly"], V)
+    return np.max(np.abs(vals - g[:, None] * M[:, rows] * M[:, cols]), axis=1), vals, g
+
+
+def psd_violation(block, op, M, V, eig_count):
+    """How far one PSD block's smallest eigenvalue can fall below zero at true points: (bound on every point by Weyl's inequality, from the rank-one identity and g(v); deficit computed directly on the first eig_count points)."""
+    s = int(block["size"])
+    err, vals, g = block_identity_error(block, op, M, V)
+    bound = s * err + np.maximum(-g, 0.0) * np.sum(M[:, :s] ** 2, axis=1)
+    deficit = 0.0
+    if eig_count:
+        _, rows, cols = op
+        B = np.zeros((eig_count, s, s))
+        B[:, rows, cols] = vals[:eig_count]
+        B[:, cols, rows] = vals[:eig_count]
+        deficit = max(float(-np.min(np.linalg.eigvalsh(B)[:, 0])), 0.0)
+    return float(np.max(bound)), deficit
+
+
+def coupling_error(rel, M, V):
+    """Largest difference between the coupled coordinates read from lifted points and the same coordinates computed from the point itself (tex 2.1, consistency)."""
+    worst = 0.0
+    for slots, knot in ((rel["tail_slots"], KNOT0), (rel["head_slots"], KNOT1)):
+        got, x = M[:, slots], V[:, list(knot)]
+        if rel["kind"] == "sdp":
+            want = [np.ones(x.shape[0])] + [x[:, a] for a in range(6)]
+            if slots.size > 7:
+                want += [x[:, a] * x[:, b] for a in range(6) for b in range(a, 6)]
+            worst = max(worst, float(np.max(np.abs(got - np.column_stack(want)))))
+        else:                                   # flow, p, theta, r: theta through (c, s), since V has no chart
+            want = np.column_stack([np.ones(x.shape[0]), x[:, 0], x[:, 1], x[:, 4], x[:, 5]])
+            worst = max(worst, float(np.max(np.abs(got[:, [0, 1, 2, 4, 5]] - want))),
+                        float(np.max(np.abs(np.cos(got[:, 3]) - x[:, 2]))), float(np.max(np.abs(np.sin(got[:, 3]) - x[:, 3]))))
+    return worst
+
+
+def validate_type(cfg, md, task, modes, tr, ti, samples):
+    """Plan 5.4 for one edge type: {type, name, samples, worst: {class: (value, where)}}. Blocks up to 32 x 32 get a direct eigenvalue on every point, larger ones on a few (relaxation.validity)."""
+    vc = cfg["relaxation"]["validity"]
+    tail, head = type_modes(tr, modes, ti)
+    kind = EDGE_KINDS[int(tr["type_kind"][ti])]
+    V = sample_true_steps(md, task, kind, tail, head, samples, np.random.default_rng([int(vc["seed"]), int(ti)]))
+    out = dict(type=int(ti), name=f"{kind} {tail['name']} -> {head['name'] if head else 'goal'}", samples=int(V.shape[0]), worst={})
+    if not V.shape[0]:
+        return out
+
+    def note(key, value, where=""):
+        if key not in out["worst"] or value > out["worst"][key][0]:
+            out["worst"][key] = (float(value), where)
+
+    for sense, p, tag in edge_constraints(md, task, kind, tail, head):
+        val = poly_eval_batch(p, V)
+        note("table", np.max(np.abs(val)) if sense == "eq" else max(float(np.max(-val)), 0.0), tag)
+    rel = relax_edge_type(cfg, md, task, modes, tr, ti)
+    cost = edge_cost(cfg, tail, head)
+    ops = [block_operator(b, rel["n"]) for b in rel["psd"]]
+    chunk = 1000 if rel["n"] < 10000 else 50
+    for start in range(0, V.shape[0], chunk):
+        v = V[start:start + chunk]
+        M = lift_points(rel, md, task, kind, tail, head, v)
+        for key, (value, where) in relaxation_violations(rel, M).items():
+            note(key, value, where)
+        note("cost", np.max(np.abs(M @ rel["c"] - poly_eval_batch(cost, v))))
+        note("coupling", coupling_error(rel, M, v))
+        for block, op in zip(rel["psd"], ops):
+            size = int(block["size"])
+            few = int(vc["eig_samples"]) if size <= 200 else int(vc["eig_samples_large"])
+            count = v.shape[0] if size <= 32 else (min(few, v.shape[0]) if start == 0 else 0)
+            bound, deficit = psd_violation(block, op, M, v, count)
+            note("psd_bound", bound, block["tag"])
+            note("psd_eig", deficit, block["tag"])
+    return out
+
+
+def validity_samples(cfg):
+    """True samples per edge type for this relaxation."""
+    rx, vc = cfg["relaxation"], cfg["relaxation"]["validity"]
+    return int(vc["samples_k3"]) if rx["type"] == "sdp" and int(rx["order"]) >= 3 else int(vc["samples"])
+
+
+def validate_relaxation(cfg, md, modes, task, tr, kinds=None):
+    """Runs validate_type on the alive edge types of one instance (optionally only some kinds), in forked workers."""
+    if cfg["relaxation"]["type"] == "sdp":
+        moment_basis(int(cfg["relaxation"]["order"]))           # built once, before the fork
+    use = tr["type_alive"].copy()
+    if kinds is not None:
+        use &= np.isin(tr["type_kind"], [EDGE_KINDS.index(k) for k in kinds])
+    samples = validity_samples(cfg)
+    return pool_map(lambda ti: validate_type(cfg, md, task, modes, tr, int(ti), samples), np.flatnonzero(use), cfg["build"])
+
+
+def validity_summary(results, vc):
+    """(ok, one-line message, worst per class) over results of validate_type."""
+    worst = {}
+    for r in results:
+        for key, (value, where) in r["worst"].items():
+            if key not in worst or value > worst[key][0]:
+                worst[key] = (value, f"{r['name']}: {where}".rstrip(": "))
+    limit = lambda key: float(vc["tol_psd"]) if key.startswith("psd") else float(vc["tol_rows"])
+    bad = {k: v for k, v in worst.items() if v[0] > limit(k)}
+    counts = [r["samples"] for r in results]
+    empty = [r["name"] for r in results if r["samples"] == 0]
+    sampled = [c for c in counts if c > 0]
+    msg = (f"{len(results)} edge types, {sum(counts)} true samples (fewest on a sampled type: {min(sampled) if sampled else 0}); worst "
+           + ", ".join(f"{k} {v[0]:.1e}" for k, v in sorted(worst.items())))
+    if empty:
+        msg += f"; NO TRUE POINT FOUND on {len(empty)} types, e.g. {empty[:6]}"
+    if bad:
+        msg += "; VIOLATIONS: " + "; ".join(f"{k} {v[0]:.2e} at {v[1]}" for k, v in sorted(bad.items()))
+    return not bad and bool(results), msg, worst
+
+
 # ===== ASSEMBLY =====
 # Vertices: start s (layer 0), then (k, mode) for k = 1..N-1, then goal t (layer N). Edge k joins
 # layer k to layer k+1, and edges are listed layer by layer, i.e. in topological order. Flow
@@ -451,15 +1412,12 @@ def hand_push(cfg, md, task, modes):
 # operator K an edge enters its head with sign + and its tail with sign -. The Python loops here
 # run once at build time; the solver itself never loops over edges.
 
-def build_trellis(cfg, task, modes):
+def build_trellis(cfg, md, task, modes):
     """Vertices, edges and edge types of plan 6.1, before pruning."""
     N, M = int(cfg["trellis"]["N"]), len(modes)
     if N < 2:
         raise ValueError("N >= 2: the trellis needs a start step and a goal step")
-    names = [m["name"] for m in modes]
-    if task["start_region"] not in names or modes[names.index(task["start_region"])]["contact"]:
-        raise ValueError(f"start region {task['start_region']!r} is not a configured non-contact region")
-    sm = names.index(task["start_region"])
+    sm = start_mode_index(md, modes, task)
     nv = 2 + (N - 1) * M
     s, t = 0, nv - 1
     vid = lambda k, m: 1 + (k - 1) * M + m
@@ -468,7 +1426,7 @@ def build_trellis(cfg, task, modes):
     for k in range(1, N):
         vert_layer[vid(k, 0):vid(k, 0) + M] = k
         vert_mode[vid(k, 0):vid(k, 0) + M] = np.arange(M)
-    allow = np.array([[transition_allowed(a, b) for b in modes] for a in modes])
+    allow = np.array([[step_allowed(md, a, b) for b in modes] for a in modes])
     types, tails, heads, etype, elayer = {}, [], [], [], []
 
     def add(k, tv, hv, kind, tm, hm):
@@ -484,7 +1442,8 @@ def build_trellis(cfg, task, modes):
             for m2 in np.flatnonzero(allow[m]):
                 add(k, vid(k, m), vid(k + 1, int(m2)), "mid", m, int(m2))
     for m in range(M):
-        add(N - 1, vid(N - 1, m), t, "goal", m, -1)
+        if goal_allowed(md, modes[m], task):
+            add(N - 1, vid(N - 1, m), t, "goal", m, -1)
     keys = sorted(types, key=types.get)
     return dict(N=N, M=M, nv=nv, s=s, t=t, start_mode=sm, allow=allow,
                 vert_layer=vert_layer, vert_mode=vert_mode,
@@ -541,7 +1500,6 @@ def tighten_box(rows, lo, hi, margin):
     Returns (None, 'infeasible') when the linear rows admit no point. That empties the true set
     and every outer model that keeps these rows, so the edge type can be pruned.
     """
-    from scipy.optimize import linprog
     kw = lp_kwargs(rows, lo, hi)
     res = linprog(np.zeros(NV), **kw)
     if res.status == 2:
@@ -571,7 +1529,6 @@ def tighten_box(rows, lo, hi, margin):
 
 def infeasibility_margin(rows, lo, hi):
     """Smallest total violation of the linear rows over the box, by an LP with nonnegative slacks; > 0 means infeasible."""
-    from scipy.optimize import linprog
     a_eq, b_eq, a_ub, b_ub = linear_rows(rows)
     ne, nu = len(b_eq), len(b_ub)
     c = np.r_[np.zeros(NV), np.ones(2 * ne + nu)]
@@ -605,9 +1562,12 @@ def prune(cfg, md, task, modes, tr):
     type_alive = np.ones(nt, bool)
     lo_t, hi_t, status = np.zeros((nt, NV)), np.zeros((nt, NV)), []
     t0 = time.perf_counter()
-    for ti in range(nt):
-        lo, hi = edge_box(md, type_modes(tr, modes, ti)[0])
-        box, st = tighten_box(type_rows(md, task, modes, tr, ti), lo, hi, margin)
+
+    def one_type(ti):
+        lo, hi = edge_box(md, *type_modes(tr, modes, ti))
+        return (lo, hi) + tighten_box(type_rows(md, task, modes, tr, ti), lo, hi, margin)
+
+    for ti, (lo, hi, box, st) in enumerate(pool_map(one_type, range(nt), cfg["build"])):
         status.append(st)
         if box is None:
             type_alive[ti] = False
@@ -624,7 +1584,71 @@ def prune(cfg, md, task, modes, tr):
 def build_instance(cfg):
     """Model, modes, task and pruned trellis of one config."""
     md, modes, task = build_model(cfg), build_modes(cfg), resolve_task(cfg)
-    return md, modes, task, prune(cfg, md, task, modes, build_trellis(cfg, task, modes))
+    return md, modes, task, prune(cfg, md, task, modes, build_trellis(cfg, md, task, modes))
+
+
+def taylor_feasible(rel):
+    """Whether a Taylor edge type's slice y = 1 has a point (an LP, since the model is polyhedral)."""
+    A, G = rel["Aeq"].toarray(), rel["G"].toarray()
+    res = linprog(np.zeros(rel["n"] - 1), A_ub=-G[:, 1:] if G.shape[0] else None, b_ub=G[:, 0] if G.shape[0] else None,
+                  A_eq=A[:, 1:] if A.shape[0] else None, b_eq=-A[:, 0] if A.shape[0] else None,
+                  bounds=list(zip(rel["lo"][1:], rel["hi"][1:])), method="highs", options=LP_OPTIONS)
+    return res.status != 2
+
+
+def prune_outer(cfg, md, modes, task, tr):
+    """Run B: an edge type whose Taylor slice is empty holds no true step, and its rows, with the bands, see more than the linear rows of the true model do (plan 6.1). Updates tr."""
+    alive = np.flatnonzero(tr["type_alive"])
+    feasible = np.array(pool_map(lambda ti: taylor_feasible(relax_edge_type(cfg, md, task, modes, tr, ti)), alive, cfg["build"]), bool)
+    tr["type_alive"][alive[~feasible]] = False
+    lp_alive = tr["type_alive"][tr["edge_type"]]
+    tr.update(edge_lp_alive=lp_alive, edge_alive=reachable(tr["nv"], tr["s"], tr["t"], tr["edge_tail"], tr["edge_head"], lp_alive))
+    return alive[~feasible]
+
+
+def build_relaxations(cfg, md, modes, task, tr):
+    """The outer model of every alive edge type (None for the others), after the validity check of plan 5.4: a violation raises, so no run can start from an invalid model."""
+    if cfg["relaxation"]["type"] == "taylor":
+        prune_outer(cfg, md, modes, task, tr)
+    ok, msg, _ = validity_summary(validate_relaxation(cfg, md, modes, task, tr), cfg["relaxation"]["validity"])
+    print(f"validity (plan 5.4): {msg}", flush=True)
+    if not ok:
+        raise RuntimeError("the outer models fail plan 5.4, so any bound computed from them would be invalid: " + msg)
+    return [relax_edge_type(cfg, md, task, modes, tr, ti) if tr["type_alive"][ti] else None for ti in range(len(tr["type_kind"]))]
+
+
+def type_group(kind, tail, head):
+    """Label of an edge type's group in the size table."""
+    if kind == "start":
+        return "start"
+    t = "contact" if tail["contact"] else "free"
+    if kind == "goal":
+        return f"goal, {t} tail"
+    return f"mid, {t} -> {'contact' if head['contact'] else 'free'}"
+
+
+def relaxation_stats(cfg, md, task, modes, tr, ti):
+    """Sizes of one edge type's outer model."""
+    rel = relax_edge_type(cfg, md, task, modes, tr, ti)
+    tail, head = type_modes(tr, modes, ti)
+    sizes = collections.Counter(int(b["size"]) for b in rel["psd"])
+    return dict(group=type_group(EDGE_KINDS[int(tr["type_kind"][ti])], tail, head), n=rel["n"], free=int(np.sum(rel["lo"] < rel["hi"])),
+                eq_raw=rel["eq_rows_raw"], eq=rel["Aeq"].shape[0], ge=rel["G"].shape[0], rows=rel["Aeq"].shape[0] + rel["G"].shape[0],
+                nnz=int(rel["Aeq"].nnz + rel["G"].nnz), blocks=" + ".join(f"{c} x {s}" for s, c in sorted(sizes.items(), reverse=True)) or "none")
+
+
+def relaxation_table(cfg, md, modes, task, tr, label):
+    """Prints the sizes the solver will see, per group of edge types (plan 5.1.7). `open` counts entries of m not pinned by their box, `eq` the equality rows kept, and eq+ge is the size of the IPM's row-form system (plan 8.1)."""
+    stats = pool_map(lambda ti: relaxation_stats(cfg, md, task, modes, tr, int(ti)), np.flatnonzero(tr["type_alive"]), cfg["build"])
+    groups = {}
+    for s in stats:
+        groups.setdefault(s["group"], []).append(s)
+    print(f"\n{label}: {len(stats)} alive edge types, {stats[0]['n']} entries of m", flush=True)
+    for name, rs in sorted(groups.items()):
+        span = lambda key: f"{min(r[key] for r in rs)}-{max(r[key] for r in rs)}"
+        print(f"  {name:24s} types {len(rs):5d}  open {span('free'):>13s}  eq raw {span('eq_raw'):>13s}  eq {span('eq'):>13s}  ge {span('ge'):>9s}  "
+              f"eq+ge {span('rows'):>13s}  nnz {span('nnz'):>15s}  psd {sorted({r['blocks'] for r in rs})}", flush=True)
+    return {name: {k: [min(r[k] for r in rs), max(r[k] for r in rs)] for k in ("free", "eq_raw", "eq", "ge", "rows", "nnz")} for name, rs in groups.items()}
 
 
 def summary(tr, modes, task):
@@ -640,18 +1664,60 @@ def summary(tr, modes, task):
                 lp_seconds=round(float(tr["lp_seconds"]), 2))
 
 
-def save_problem(path, cfg, md, modes, task, tr):
-    """Writes the graph part of problem.npz (plan 6.1); the relaxation data joins it in M1."""
+def pack_relaxations(rels):
+    """Per-type outer models as flat arrays for problem.npz (plan 6.1, 6.2): rows as (type, row, col, value), PSD maps as (type, block, row, col, moment, coefficient). Block 0 is the moment matrix, shared by all SDP types and stored once. Per type rather than per edge: memory scales with the types."""
+    first = next(r for r in rels if r is not None)
+    nt, n = len(rels), first["n"]
+    out = dict(rel_kind=first["kind"], rel_n=n, rel_tail_slots=first["tail_slots"], rel_head_slots=first["head_slots"],
+               rel_lo=np.zeros((nt, n)), rel_hi=np.zeros((nt, n)), rel_c=np.zeros((nt, n)),
+               rel_eq_rows=np.zeros(nt, np.int64), rel_ge_rows=np.zeros(nt, np.int64))
+    coo = dict(eq=[], ge=[])
+    psd, psd_sizes, soc = [], [], []
+    for ti, rel in enumerate(rels):
+        if rel is None:
+            continue
+        out["rel_lo"][ti], out["rel_hi"][ti], out["rel_c"][ti] = rel["lo"], rel["hi"], rel["c"]
+        out["rel_eq_rows"][ti], out["rel_ge_rows"][ti] = rel["Aeq"].shape[0], rel["G"].shape[0]
+        for key, mat in (("eq", rel["Aeq"]), ("ge", rel["G"])):
+            c = mat.tocoo()
+            coo[key].append((np.full(c.nnz, ti, np.int32), c.row.astype(np.int32), c.col.astype(np.int32), c.data))
+        for b, block in enumerate(rel["psd"]):
+            if b > 0:
+                psd.append((np.full(block["row"].size, ti, np.int32), np.full(block["row"].size, b, np.int32),
+                            block["row"], block["col"], block["mom"], block["coef"]))
+                psd_sizes.append((ti, b, block["size"]))
+        soc += [(ti, s["z"], s["scale"]) + tuple(s["form"].toarray().ravel()) for s in rel["soc"]]
+    for key, parts in coo.items():
+        for name, column in zip(("type", "row", "col", "val"), zip(*parts)):
+            out[f"rel_{key}_{name}"] = np.concatenate(column)
+    if first["psd"]:
+        out.update(rel_moment_size=first["psd"][0]["size"], rel_moment_row=first["psd"][0]["row"], rel_moment_col=first["psd"][0]["col"],
+                   rel_moment_mom=first["psd"][0]["mom"])
+    if psd:
+        for name, column in zip(("type", "block", "row", "col", "mom", "coef"), zip(*psd)):
+            out[f"rel_psd_{name}"] = np.concatenate(column)
+        out["rel_psd_sizes"] = np.array(psd_sizes, np.int64)
+    if soc:
+        out["rel_soc"] = np.array(soc)                          # (type, z, scale, form over m)
+    return out
+
+
+def save_problem(path, cfg, md, modes, task, tr, rels):
+    """Writes problem.npz (plan 6.1): the graph and the per-type outer models."""
     path.parent.mkdir(parents=True, exist_ok=True)
     meta = dict(summary=summary(tr, modes, task), modes=[m["name"] for m in modes], var_names=list(VAR_NAMES),
                 edge_kinds=list(EDGE_KINDS), task=dict(name=task["name"], start=task["start"].tolist(),
                 goal=task["goal"].tolist(), pusher_start=task["pusher_start"].tolist(), start_region=task["start_region"]),
-                model={k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in md.items()})
-    np.savez_compressed(path, meta=json.dumps(meta),
-                        **{k: tr[k] for k in ("vert_layer", "vert_mode", "edge_tail", "edge_head", "edge_type", "edge_layer",
-                                              "edge_lp_alive", "edge_alive", "type_kind", "type_tail", "type_head",
-                                              "type_alive", "type_lo", "type_hi", "allow")},
-                        type_status=tr["type_status"].astype("U32"), s=tr["s"], t=tr["t"], N=tr["N"], M=tr["M"])
+                model={k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in md.items()},
+                relaxation=cfg["relaxation"])
+    arrays = pack_relaxations(rels)
+    # compressing a kappa = 3 model takes minutes and saves little that matters
+    writer = np.savez_compressed if sum(np.size(a) for a in arrays.values()) < 5e7 else np.savez
+    writer(path, meta=json.dumps(meta), **arrays,
+           **{k: tr[k] for k in ("vert_layer", "vert_mode", "edge_tail", "edge_head", "edge_type", "edge_layer",
+                                 "edge_lp_alive", "edge_alive", "type_kind", "type_tail", "type_head",
+                                 "type_alive", "type_lo", "type_hi", "allow")},
+           type_status=tr["type_status"].astype("U32"), s=tr["s"], t=tr["t"], N=tr["N"], M=tr["M"])
 
 
 # ===== SELFTEST =====
@@ -884,9 +1950,9 @@ def check_flow_signs(cfg, md, modes, task, tr):
 def check_pruning(cfg, md, modes, task, tr):
     gap = float(cfg["pruning"]["infeasible_margin"])
     pruned = np.flatnonzero(~tr["type_alive"])
-    for ti in pruned:
-        lo, hi = edge_box(md, type_modes(tr, modes, ti)[0])
-        miss = infeasibility_margin(type_rows(md, task, modes, tr, ti), lo, hi)
+    misses = pool_map(lambda ti: infeasibility_margin(type_rows(md, task, modes, tr, ti), *edge_box(md, *type_modes(tr, modes, ti))),
+                      pruned, cfg["build"])
+    for ti, miss in zip(pruned, misses):
         if miss <= gap:
             tail, head = type_modes(tr, modes, ti)
             return False, f"type {ti} ({tail['name']} -> {head['name'] if head else 'goal'}) was pruned but misses feasibility by only {miss:.1e}"
@@ -930,7 +1996,308 @@ def run_checks(checks):
     return ok_all, results
 
 
+def check_moment_basis():
+    """Sizes of plan 5.1.1, the monomial order, the index tables at random points, and the interval box on a random box."""
+    rng = np.random.default_rng(3)
+    lines = []
+    for kappa, (n, s) in {1: (136, 16), 2: (3876, 136), 3: (54264, 816)}.items():
+        b = moment_basis(kappa)
+        monos = b["monos"]
+        if len(monos) != n or b["upto"][kappa] != s:
+            return False, f"kappa {kappa}: {len(monos)} moments and a {b['upto'][kappa]} x {b['upto'][kappa]} moment matrix, plan 5.1.1 says {n} and {s}"
+        if any((len(x), x) >= (len(y), y) for x, y in zip(monos, monos[1:])):
+            return False, f"kappa {kappa}: monomials are not ordered by degree, then lexicographically"
+        if np.unique(b["mat"]).size != n:
+            return False, f"kappa {kappa}: not every moment appears in the moment matrix"
+        V = rng.uniform(-1.0, 1.0, (4, NV))
+        M = rank_one_moments(b, V)
+        low = b["times"].shape[1]
+        err = max(float(np.max(np.abs(M[:, b["times"][i]] - V[:, [i]] * M[:, :low]))) for i in range(NV))
+        err = max(err, float(np.max(np.abs(M[:, b["mat"]] - M[:, :s, None] * M[:, None, :s]))))
+        if err > 1e-13:
+            return False, f"kappa {kappa}: index tables disagree with monomial values by {err:.1e}"
+        lines.append(f"kappa {kappa}: {n} moments, {s} x {s}, tables good to {err:.0e}")
+    b = moment_basis(2)
+    lo = rng.uniform(-1.0, 0.5, NV)
+    hi = lo + rng.uniform(0.0, 1.0, NV)
+    lo[3], hi[3] = 0.0, 0.0
+    mlo, mhi = moment_box(b, lo, hi)
+    M = rank_one_moments(b, rng.uniform(lo, hi, (2000, NV)))
+    if np.any(M < mlo - 1e-12) or np.any(M > mhi + 1e-12):
+        return False, "random points in a box leave the interval moment bounds"
+    mlo, mhi = moment_box(b, -np.ones(NV), 2.0 * np.ones(NV))
+    expect = {(0, 0): (0.0, 4.0), (0, 1): (-2.0, 4.0), (0, 0, 1, 1): (0.0, 16.0), (0, 0, 0): (-1.0, 8.0)}
+    for mono, (a, c) in expect.items():
+        i = b["index"][mono]
+        if (mlo[i], mhi[i]) != (a, c):
+            return False, f"interval box of monomial {mono} over [-1, 2]: ({mlo[i]}, {mhi[i]}), expected ({a}, {c})"
+    return True, "; ".join(lines) + "; interval box holds on random points and is exact on hand cases"
+
+
+def check_sampler(inst):
+    """Contact samples must reproduce the scalar true step of M0, an independent path through the model."""
+    md, modes, task, tr = inst
+    rng = np.random.default_rng(5)
+    limit = math.sin(md["theta_step_max"])
+    k_rot = md["dt"] * md["c_v"] / md["tau_max"] ** 2
+    mid = np.flatnonzero(tr["type_alive"] & (tr["type_kind"] == EDGE_KINDS.index("mid")))
+    worst, count, seen = 0.0, 0, set()
+    for ti in mid:
+        tail, head = type_modes(tr, modes, ti)
+        if not tail["contact"] or tail["name"] in seen:
+            continue
+        seen.add(tail["name"])
+        for v in sample_true_steps(md, task, "mid", tail, head, 100, rng):
+            if abs(k_rot * v[TAU]) > limit * (1.0 - 1e-12):
+                continue
+            slide = md["tangents"][tail["face"]] @ (v[[RX1, RY1]] - v[[RX0, RY0]])
+            x1, tau = true_contact_step(md, v[:6], tail["face"], v[FN], v[FT], slide)
+            worst = max(worst, float(np.max(np.abs(x1 - v[6:12]))), abs(tau - v[TAU]))
+            count += 1
+    return worst <= 1e-12 and count > 0, f"{count} samples over {len(seen)} contact modes match the scalar true step to {worst:.1e}"
+
+
+def check_region_graph(inst, samples=2000):
+    """Region copies: transition counts per layer (plan 5.2.2), and every true contact step has an allowed pair of copies (tex Prop 3.7)."""
+    md, modes, task, tr = inst
+    splits = md["theta_splits"]
+    width = 2.0 * math.pi / splits
+    parents = [m for m in modes if m["theta"] == 0]
+    free = sum(transition_allowed(a, b) for a in parents if not a["contact"] for b in parents)
+    contact = sum(transition_allowed(a, b) for a in parents if a["contact"] for b in parents)
+    reach = min(splits, 1 + 2 * (1 + int(md["theta_step_max"] / width)))
+    expect = splits * (free + contact * reach)
+    if int(tr["allow"].sum()) != expect:
+        return False, f"{int(tr['allow'].sum())} transitions per layer, expected {splits} x ({free} + {contact} x {reach}) = {expect}"
+    plain = dict(md, theta_splits=1, lambda_splits=1)
+    rng = np.random.default_rng(7)
+    checked = 0
+    for j in range(4):
+        mode = dict(contact=True, face=j, ctype="stick", region=None, name=f"c{j}_stick")
+        V = sample_true_steps(plain, task, "mid", mode, mode, samples, rng)
+        th0, th1 = np.arctan2(V[:, S0], V[:, C0]), np.arctan2(V[:, S1], V[:, C1])
+        for a, b in zip(th0, th1):
+            la, lb = theta_label(float(a), splits), theta_label(float(b), splits)
+            if not step_allowed(md, dict(mode, theta=la), dict(mode, theta=lb)):
+                return False, f"a true step from angle {a:.4f} to {b:.4f} has no allowed copy (regions {la} -> {lb})"
+            checked += 1
+    return True, f"{expect} transitions per layer at {splits} theta regions; {checked} random true steps all have an allowed pair of copies"
+
+
+def lift_identity_type(cfg, md, task, modes, tr, ti, V, M):
+    """Largest error of one edge type's lifted rows, blocks and cost against their source polynomials at points V, plus (rank of the raw equalities, rows kept)."""
+    tail, head = type_modes(tr, modes, ti)
+    kind = EDGE_KINDS[int(tr["type_kind"][ti])]
+    rel = relax_edge_type(cfg, md, task, modes, tr, ti)
+    basis = moment_basis(rel["kappa"])
+    eqs = [p for s, p, _ in edge_constraints(md, task, kind, tail, head) if s == "eq"]
+    raw, owner, mult = lift_rows(basis, eqs, True)
+    values = np.stack([poly_eval_batch(p, V) for p in eqs])
+    err = float(np.max(np.abs(raw @ M.T - values[owner] * M[:, mult].T)))
+    values = np.stack([poly_eval_batch(p, V) for p in rel["ge_polys"]])
+    err = max(err, float(np.max(np.abs(rel["G"] @ M.T - values))))
+    err = max(err, float(np.max(np.abs(M @ rel["c"] - poly_eval_batch(edge_cost(cfg, tail, head), V)))))
+    for block in rel["psd"]:
+        err = max(err, float(np.max(block_identity_error(block, block_operator(block, rel["n"]), M, V)[0])))
+    rank = None
+    if rel["kappa"] == 1:
+        d = raw.toarray()
+        rank = int(np.linalg.matrix_rank(d / np.linalg.norm(d, axis=1, keepdims=True), tol=1e-10))
+    return err, rank, rel["Aeq"].shape[0]
+
+
+def check_lift_identity(cfg, inst, max_types=None):
+    """Negative control for the rows (plan 5.4): at random infeasible points, where no row vanishes, each lifted row, block and cost must equal the polynomial it came from. Rows that are trivially zero would pass the validity check but fail here. At kappa 1, the rows kept must span the raw rows."""
+    md, modes, task, tr = inst
+    basis = moment_basis(int(cfg["relaxation"]["order"]))
+    V = np.random.default_rng(11).uniform(-1.0, 1.0, (8, NV))
+    M = rank_one_moments(basis, V)
+    alive = np.flatnonzero(tr["type_alive"])
+    if max_types:
+        alive = alive[np.linspace(0, alive.size - 1, max_types).astype(int)]
+    out = pool_map(lambda ti: lift_identity_type(cfg, md, task, modes, tr, int(ti), V, M), alive, cfg["build"])
+    worst = max(r[0] for r in out)
+    short = sum(1 for _, rank, kept in out if rank is not None and rank != kept)
+    if short:
+        return False, f"{short} edge types keep equality rows that do not span the raw ones"
+    return worst <= 1e-10, f"{len(out)} edge types: lifted rows, blocks and costs match at random points to {worst:.1e}" + (
+        "; the rows kept span the raw rows" if int(cfg["relaxation"]["order"]) == 1 else "")
+
+
+def check_validity(cfg, instances, record, label):
+    """Plan 5.4 on one relaxation: every alive edge type of the first task, and the start and goal types of the others (the mid types do not depend on the task)."""
+    results = []
+    for i, inst in enumerate(instances.values()):
+        results += validate_relaxation(cfg, *inst, kinds=None if i == 0 else ("start", "goal"))
+    ok, msg, worst = validity_summary(results, cfg["relaxation"]["validity"])
+    record[label] = dict(types=len(results), samples=sum(r["samples"] for r in results), worst={k: [v[0], v[1]] for k, v in worst.items()},
+                         no_true_point=[r["name"] for r in results if r["samples"] == 0])
+    return ok, msg
+
+
+def check_negative_controls(cfg, inst):
+    """The validity check must be able to fail: true samples moved off the true set must be flagged (plan 5.4)."""
+    md, modes, task, tr = inst
+    mid = np.flatnonzero(tr["type_alive"] & (tr["type_kind"] == EDGE_KINDS.index("mid")))
+    tail_of = lambda ti: modes[int(tr["type_tail"][ti])]
+    ti_contact = int(next(t for t in mid if tail_of(t)["contact"]))
+    ti_free = int(next(t for t in mid if not tail_of(t)["contact"]))
+    sdp = cfg["relaxation"]["type"] == "sdp"
+    bilinear = "eq" if sdp else "ge"                            # exact rows in the moments, band rows in the Taylor model
+    line_col = RX0 if abs(md["normals"][tail_of(ti_contact)["face"]][0]) > 0.5 else RY0
+    cases = [("torque", ti_contact, TAU, 1e-3, bilinear), ("translation", ti_contact, PX1, 0.2, bilinear),
+             ("contact line", ti_contact, line_col, 1e-3, "eq"), ("friction", ti_contact, FT, 0.5, "ge"),
+             ("static slider", ti_free, PX1, 1e-3, "eq"), ("zero force", ti_free, FN, 1e-3, "eq")]
+    if sdp:
+        cases.append(("unit norm", ti_contact, C0, 0.01, "eq"))
+        if int(cfg["relaxation"]["order"]) >= 2:
+            cases.append(("localizing block", ti_contact, FN, 1.0, "psd"))
+    rng = np.random.default_rng(13)
+    lines = []
+    for name, ti, col, delta, cls in cases:
+        tail, head = type_modes(tr, modes, ti)
+        kind = EDGE_KINDS[int(tr["type_kind"][ti])]
+        V = sample_true_steps(md, task, kind, tail, head, 64, rng)
+        if not V.shape[0]:
+            return False, f"{name}: no true samples on {tail['name']} -> {head['name']}"
+        rel = relax_edge_type(cfg, md, task, modes, tr, ti)
+        V = V.copy()
+        V[:, col] += delta
+        M = lift_points(rel, md, task, kind, tail, head, V)
+        if cls == "psd":
+            value = max(psd_violation(b, block_operator(b, rel["n"]), M, V, 0)[0] for b in rel["psd"])
+        else:
+            value = relaxation_violations(rel, M)[cls][0]
+        if value <= 1e-6:
+            return False, f"{name}: moving column {VAR_NAMES[col]} by {delta} went unflagged ({cls} violation {value:.1e})"
+        lines.append(f"{name} {value:.1e}")
+    return True, "flagged: " + ", ".join(lines)
+
+
+def check_path_lift(cfg, inst):
+    """Along the hand push: every lifted step satisfies its model, each head's coupled coordinates equal the next tail's, and the linear costs sum to J_hand (tex 2.1, Thm 2.6)."""
+    md, modes, task, tr = inst
+    steps = hand_push(cfg, md, task, modes)
+    worst, viol, J, J_true, prev = 0.0, 0.0, 0.0, 0.0, None
+    for (kind, tail, head, v), e in zip(steps, path_edge_ids(tr, modes, steps)):
+        rel = relax_edge_type(cfg, md, task, modes, tr, int(tr["edge_type"][e]))
+        M = lift_points(rel, md, task, kind, tail, head, v[None])
+        viol = max(viol, max(value for value, _ in relaxation_violations(rel, M).values()))
+        if prev is not None:
+            worst = max(worst, float(np.max(np.abs(prev - M[0, rel["tail_slots"]]))))
+        prev = M[0, rel["head_slots"]]
+        J += float(M[0] @ rel["c"])
+        J_true += poly_eval(edge_cost(cfg, tail, head), v)
+    ok = worst <= 1e-12 and viol <= 1e-9 and abs(J - J_true) <= 1e-12
+    return ok, f"{len(steps)} steps, q = {prev.size}: coupling mismatch {worst:.1e}, row violation {viol:.1e}, linear cost {J:.6f} vs J_hand {J_true:.6f}"
+
+
+def check_bands(cfg, inst):
+    """Prints the band report. The bands of the alive types stay under the worst-case formula, the sizing is minimal, and the translation band is first order in the region size (tex Remark 3.2)."""
+    md, modes, task, tr = inst
+    band_report(cfg, md, modes, task, tr)
+    widths = band_widths(cfg, md, modes, task, tr)
+    splits, cells = md["theta_splits"], md["lambda_splits"]
+    e_tr, e_tau, e_rot = worst_bands(md, splits, cells)
+    slack = 1.0 + 1e-5                                          # the LP boxes carry a small outward pad
+    top = max(widths["trans_x"] + widths["trans_y"])
+    if top > e_tr * slack or max(widths["torque"]) > e_tau * slack or abs(max(widths["rot_rel"]) - e_rot) > 1e-12:
+        return False, f"bands exceed the worst-case formula: translation {top:.3e} vs {e_tr:.3e}, torque {max(widths['torque']):.3e} vs {e_tau:.3e}"
+    target = cfg["relaxation"]["size_regions"]
+    s, l = size_regions(md, target)
+    if s is None or l is None:
+        return False, f"max_splits cannot meet the sizing targets: {s}, {l}"
+    if worst_bands(md, s, 1)[0] > float(target["trans"]) or (s > 3 and worst_bands(md, s - 1, 1)[0] <= float(target["trans"])):
+        return False, f"theta_splits {s} is not the smallest that meets the target"
+    ratio = worst_bands(md, 512, 1)[0] / worst_bands(md, 256, 1)[0]             # fine regions: the first-order term dominates
+    if not 0.47 <= ratio <= 0.53:
+        return False, f"doubling theta_splits from 256 scales the translation band by {ratio:.3f}, expected about 0.5 (first order)"
+    return True, f"bands within the formula (translation {top:.3e} m, torque {max(widths['torque']):.3e} N m, rotation {e_rot:.3e} rad); doubling fine regions scales translation by {ratio:.3f}; sizing target needs {s} theta and {l} lambda splits"
+
+
+def check_outer_pruning(cfg, inst):
+    """Run B's own LP pruning: an edge type that holds a true sample must never be pruned."""
+    md, modes, task, tr = inst
+    light = deep_merge(cfg, {"relaxation": {"validity": {"samples": 200}}})
+    samples = {r["type"]: r["samples"] for r in validate_relaxation(light, md, modes, task, tr)}
+    copy_tr = dict(tr, type_alive=tr["type_alive"].copy())
+    pruned = prune_outer(cfg, md, modes, task, copy_tr)
+    wrong = [int(ti) for ti in pruned if samples.get(int(ti), 0) > 0]
+    if wrong:
+        return False, f"{len(wrong)} edge types with true samples were pruned, e.g. {wrong[:5]}"
+    return True, f"{len(pruned)} of {len(samples)} LP-alive edge types pruned, none holding a true sample; {int(copy_tr['edge_alive'].sum())} of {len(tr['edge_tail'])} edges kept"
+
+
+def selftest_m1(cfg):
+    """Milestone M1 (plan 5.4, 17): the outer models on the full mode set, for every relaxation the run matrix uses."""
+    st = cfg["selftest"]
+    base = deep_merge(cfg, {"trellis": {"faces": [0, 1, 2, 3], "regions": "all"},
+                            "relaxation": {"type": "sdp", "order": 1, "regions": {"theta_splits": 1, "lambda_splits": 1},
+                                           "taylor_mode": "band", "cost_model": "tangent_planes"}})
+    sdp = {k: deep_merge(base, {"relaxation": {"order": k}}) for k in (1, 2, 3)}
+    regioned = deep_merge(base, {"relaxation": {"regions": {"theta_splits": int(st["theta_splits"])}}})
+    taylor = deep_merge(regioned, {"relaxation": {"type": "taylor"}})
+    mcc = deep_merge(taylor, {"relaxation": {"taylor_mode": "mccormick"}})
+    soc = deep_merge(taylor, {"relaxation": {"cost_model": "soc"}})
+    t0 = time.perf_counter()
+    build_all = lambda c: {t: build_instance(deep_merge(c, {"task": t})) for t in c["tasks"]}
+    plain, split = build_all(sdp[1]), build_all(regioned)
+    print(f"built {len(plain)} tasks without and with {st['theta_splits']} theta regions in {time.perf_counter() - t0:.1f}s; "
+          f"with regions: {json.dumps(summary(split[st['task']][3], split[st['task']][1], split[st['task']][2]))}", flush=True)
+    for k in sdp:
+        moment_basis(k)                                         # built once, before any fork
+    i1, i2 = plain[st["task"]], split[st["task"]]
+    pair = {t: split[t] for t in (st["task"], base["task"])}    # the McCormick and SOC variants: fewer tasks
+    record = {}
+
+    def tables():
+        record["sizes"] = {
+            "sdp_k1": relaxation_table(sdp[1], *i1, "SDP kappa 1"),
+            "sdp_k2": relaxation_table(sdp[2], *i1, "SDP kappa 2"),
+            "sdp_k3": relaxation_table(sdp[3], *i1, "SDP kappa 3"),
+            "sdp_k1_regions": relaxation_table(regioned, *i2, "SDP kappa 1 with theta regions (A-reg)"),
+            "taylor": relaxation_table(taylor, *i2, "Taylor (B)"),
+        }
+        return True, "printed above"
+
+    checks = [
+        ("M1 moment basis: sizes, order, index tables, interval box", check_moment_basis),
+        ("M1 sampler against the scalar true step", lambda: check_sampler(i1)),
+        ("M1 region copies hold every true step", lambda: check_region_graph(i2)),
+        ("M1 lifted rows match their polynomials, kappa 1", lambda: check_lift_identity(sdp[1], i1)),
+        ("M1 lifted rows match their polynomials, kappa 2", lambda: check_lift_identity(sdp[2], i1)),
+        ("M1 lifted rows match their polynomials, kappa 3 (3 edge types)", lambda: check_lift_identity(sdp[3], i1, 3)),
+        ("M1 validity 5.4, SDP kappa 1", lambda: check_validity(sdp[1], plain, record, "sdp_k1")),
+        ("M1 validity 5.4, SDP kappa 2", lambda: check_validity(sdp[2], plain, record, "sdp_k2")),
+        ("M1 validity 5.4, SDP kappa 3", lambda: check_validity(sdp[3], plain, record, "sdp_k3")),
+        ("M1 validity 5.4, SDP kappa 1 with theta regions (A-reg)", lambda: check_validity(regioned, split, record, "sdp_k1_regions")),
+        ("M1 validity 5.4, Taylor bands (B)", lambda: check_validity(taylor, split, record, "taylor_band")),
+        ("M1 validity 5.4, Taylor McCormick", lambda: check_validity(mcc, pair, record, "taylor_mccormick")),
+        ("M1 validity 5.4, Taylor SOC costs", lambda: check_validity(soc, pair, record, "taylor_soc")),
+        ("M1 negative controls, SDP kappa 1", lambda: check_negative_controls(sdp[1], i1)),
+        ("M1 negative controls, SDP kappa 2", lambda: check_negative_controls(sdp[2], i1)),
+        ("M1 negative controls, Taylor", lambda: check_negative_controls(taylor, i2)),
+        ("M1 coupling and cost along the hand push, SDP kappa 1", lambda: check_path_lift(sdp[1], i1)),
+        ("M1 coupling and cost along the hand push, SDP kappa 2", lambda: check_path_lift(sdp[2], i1)),
+        ("M1 coupling and cost along the hand push, Taylor", lambda: check_path_lift(taylor, i2)),
+        ("M1 Taylor bands and region sizing", lambda: check_bands(taylor, i2)),
+        ("M1 Taylor feasibility pruning", lambda: check_outer_pruning(taylor, i2)),
+        ("M1 sizes per group of edge types (plan 5.1.7)", tables),
+    ]
+    ok, results = run_checks(checks)
+    out = ROOT / cfg["output"]["root"] / "selftest" / "m1.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(dict(ok=ok, results=results, record=record), indent=2))
+    print(f"\n{'ALL M1 CHECKS PASSED' if ok else 'SOME M1 CHECKS FAILED'} in {time.perf_counter() - t0:.0f}s; details in {out}", flush=True)
+    return ok
+
+
 def selftest(cfg):
+    """The milestone checks in order; a milestone runs only after the one before it passes (plan 0)."""
+    return selftest_m0(cfg) and selftest_m1(cfg)
+
+
+def selftest_m0(cfg):
     """Milestone M0 checks on the tiny instance (plan 12.3) and on the full mode set."""
     st = cfg["selftest"]
     tiny_cfg = deep_merge(cfg, {"task": st["task"], "trellis": {"N": st["N"], "faces": st["faces"], "regions": st["regions"]}})
@@ -973,17 +2340,23 @@ def main():
     ap.add_argument("--task", default=None, help="task name, overriding the config")
     ap.add_argument("--set", action="append", default=[], help="override one key, e.g. --set trellis.N=16")
     ap.add_argument("--selftest", action="store_true", help="run the milestone checks")
-    ap.add_argument("--build", action="store_true", help="build, prune and save the trellis of the run")
+    ap.add_argument("--build", action="store_true", help="build, prune, validate and save the edge models of the run")
+    ap.add_argument("--band_report", action="store_true", help="print the Taylor bands and the region sizing table of the run")
     args = ap.parse_args()
     cfg = load_config(args.run, args.set)
     if args.task:
         cfg["task"] = args.task
     if args.selftest:
         sys.exit(0 if selftest(cfg) else 1)
+    if args.band_report:
+        band_report(cfg, *build_instance(cfg))
+        return
     if args.build:
         md, modes, task, tr = build_instance(cfg)
+        rels = build_relaxations(cfg, md, modes, task, tr)
+        relaxation_table(cfg, md, modes, task, tr, cfg["run_name"])
         path = ROOT / cfg["output"]["root"] / cfg["run_name"] / task["name"] / str(cfg["seed"]) / "problem.npz"
-        save_problem(path, cfg, md, modes, task, tr)
+        save_problem(path, cfg, md, modes, task, tr, rels)
         print(json.dumps(summary(tr, modes, task), indent=2))
         print(f"saved {path}")
         return

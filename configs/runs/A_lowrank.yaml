@@ -1,0 +1,4 @@
+# Run A with the low-rank PSD projection in place of exact eigh, to compare the two at order 1 on
+# the real problem (plan 8.2). Everything else matches A.
+run_name: A_lowrank
+solver: {psd_proj: lowrank}

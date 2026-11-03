@@ -1,6 +1,6 @@
-"""PDHG solver for the planar-pushing trellis (plan sections 7-12): the PDHG round at order 1, its certificate and stopping test (M3), the exact segment tree behind its safeguard (M6), and the benchmarks of the GPU primitives a round uses, each checked for true batching (plan section 0). Skipping and the compressed trees are still to come.
+"""PDHG solver for the planar-pushing trellis (plan sections 7-12): the PDHG round at order 1, its certificate and stopping test (M3), exact skipping with compaction (M5), the exact segment tree behind its safeguard (M6), and the benchmarks of the GPU primitives a round uses, each checked for true batching (plan section 0). The moment matrix's PSD constraint sits inside each edge step by default (solver.psd_coupling: edge, plan 8.4); `split` keeps the earlier copies S and duals Lam. The face cache and the compressed trees are still to come.
 
-    python run_trajopt.py --selftest                 # milestones M3 and M6, on the tiny instance
+    python run_trajopt.py --selftest                 # milestones M3, M5 and M6, on the tiny instance
     python run_trajopt.py --selftest_m6              # milestone M6 alone
     python run_trajopt.py --run A --task T3_translate_rotate   # solve one run with the exact tree, building its problem.npz if needed
     python run_trajopt.py --run D --task T3_translate_rotate   # the same with plain PDHG
@@ -518,6 +518,7 @@ def build_data(prob, cfg):
     meta = json.loads(str(prob["meta"]))
     if str(prob["rel_kind"]) != "sdp" or int(meta["relaxation"]["order"]) != 1 or not meta["relaxation"]["eliminate_linear"]:
         raise NotImplementedError("the solver covers the reduced moment relaxation at order 1 so far")
+    split = psd_coupling(cfg) == "split"
     rho, root2 = 0.99, math.sqrt(2.0)
     alive = np.flatnonzero(prob["edge_alive"])
     etype = prob["edge_type"][alive]
@@ -587,7 +588,9 @@ def build_data(prob, cfg):
     head_coef[heads == dst, 1:] = 0.0
     edge = np.arange(E)[:, None]
     head_rows, tail_rows = vpos[heads][:, None] * q + np.arange(q), vpos[tails][:, None] * q + np.arange(q)
-    colsum = col_t[etype].copy()
+    # With the PSD constraint inside the edge step, K is the whole operator, so the PSD coupling's column
+    # sums drop out of the primal steps (plan 7.3, 8.4).
+    colsum = col_t[etype].copy() if split else np.zeros_like(col_t[etype])
     np.add.at(colsum, (np.broadcast_to(edge, tail_idx.shape), tail_idx), np.abs(tail_coef))
     np.add.at(colsum, (np.broadcast_to(edge, head_idx.shape), head_idx), np.abs(head_coef))
     rowsum = np.zeros(V * q)
@@ -630,8 +633,17 @@ def build_data(prob, cfg):
         sig_l=mask_t[etype] * rho / (weight + 1.0), b=b, is_flow=is_flow, state_mask=1.0 - is_flow.astype(float), delta=np.asarray(float(cfg["solver"]["delta"])),
         layers=layers, dist0=dist0, goal=np.asarray(vpos[dst]), eps_cert=np.asarray(float(cfg["certificate"]["eps_cert"])),
         v_layer=vlayer, v_slot=slot, tail_slot=slot[vpos[tails]], head_slot=slot[vpos[heads]], edge_layer=layer, tree_mask=tree_mask)
-    info = dict(E=int(E), V=int(V), q=q, n=n, r=r, s=s, alive=alive, types=int(used.size), meta=meta, tree_layers=tree_layers, tree_width=tree_width)
+    info = dict(E=int(E), V=int(V), q=q, n=n, r=r, s=s, alive=alive, types=int(used.size), meta=meta, tree_layers=tree_layers, tree_width=tree_width,
+                psd="split" if split else "edge")
     return jax.tree_util.tree_map(jnp.asarray, arrays), info
+
+
+def psd_coupling(cfg):
+    """Where the moment matrix's PSD constraint lives (plan 8.4): `edge`, inside each edge step, or `split`, as copies S with duals Lam."""
+    mode = cfg["solver"].get("psd_coupling", "split")
+    if mode not in ("edge", "split"):
+        raise ValueError(f"solver.psd_coupling must be edge or split, not {mode!r}")
+    return mode
 
 
 def k_forward(d, m):
@@ -661,8 +673,26 @@ def psd_forward(d, m):
 
 
 def psd_adjoint(d, lam):
-    """B*(Lam) (E, n), with <Lam, B(m)> the Frobenius product."""
+    """B*(Lam) (E, n), with <Lam, B(m)> the Frobenius product. Lam must be symmetric: the off-diagonal entry is read once and counted twice."""
     return jnp.take_along_axis(lam.reshape(lam.shape[0], -1), d["adj"], axis=1) * d["adj_w"]
+
+
+def sym(a):
+    return 0.5 * (a + swap(a))
+
+
+def chol(a):
+    return jax.lax.linalg.cholesky(a, symmetrize_input=False)
+
+
+def factor_solve(factor, b):
+    """(L L^T)^-1 b for a lower-triangular factor L; b has columns."""
+    return lower_solve(factor, lower_solve(factor, b), transpose=True)
+
+
+def pick(mask, a, b):
+    """a where mask (E,) holds, else b, broadcast over a's trailing axes."""
+    return jnp.where(mask.reshape(mask.shape + (1,) * (a.ndim - 1)), a, b)
 
 
 # ===== EDGE_SOLVERS: EDGE QP =====
@@ -695,6 +725,7 @@ def spd_solve(factor, b, method):
 
 
 SLACKS = ("sg", "zg", "sl", "zl", "su", "zu")
+FIELDS = ("x", "nu") + SLACKS
 
 
 def edge_qp(d, h, f, ipm):
@@ -722,6 +753,12 @@ def edge_qp(d, h, f, ipm):
 
     def body(v):
         rd, ra, rg, rl, ru, mu, metric = residuals(v)
+        # Keep each edge's best iterate. Past its attainable accuracy (a nearly pinned entry caps it near
+        # 1e-10) an edge would otherwise keep driving mu and its slacks toward underflow, where the
+        # Newton systems break down and the residual explodes (1e+14 and beyond in plain PDHG runs).
+        better = metric < v["best_metric"]
+        best = {k: jnp.where(better[:, None], v[k], v["best"][k]) for k in FIELDS}
+        best_metric = jnp.minimum(metric, v["best_metric"])
         sg, zg, sl, zl, su, zu = (v[k] for k in SLACKS)
         zg_safe = zg + (1.0 - gef)
         dl, du = zl / sl, zu / su
@@ -760,9 +797,12 @@ def edge_qp(d, h, f, ipm):
                          rmu + affine["su"] * affine["zu"] - op * center)
         alpha = jnp.minimum(1.0, 0.995 * to_boundary(v, full))
         sane = jnp.all(jnp.isfinite(full["x"]), axis=1) & jnp.all(jnp.isfinite(full["nu"]), axis=1) & jnp.all(jnp.isfinite(full["zg"]), axis=1)
-        move = jnp.where((metric > tol) & sane, alpha, 0.0)
+        # An edge stops once it meets tol, once mu is far below tol (more iterations then only push the
+        # slacks toward underflow), or once its residual has grown far past its best (it is diverging).
+        go = (metric > tol) & sane & (mu > 1e-3 * tol) & (metric <= 1e3 * best_metric)
+        move = jnp.where(go, alpha, 0.0)
         new = {k: v[k] + move[:, None] * jnp.where(jnp.isfinite(full[k]), full[k], 0.0) for k in full}
-        new.update(it=v["it"] + 1, active=(metric > tol) & sane)
+        new.update(it=v["it"] + 1, active=go, best=best, best_metric=best_metric)
         return new
 
     x0 = 0.5 * (lo + hi) * op + e0
@@ -772,14 +812,193 @@ def edge_qp(d, h, f, ipm):
     sg0 = gef * jnp.maximum(rx0, 0.1 * (1.0 + jnp.abs(rx0))) + (1.0 - gef)
     v = dict(x=x0, nu=jnp.zeros_like(rx0), sg=sg0, zg=gef * mu0 / sg0, sl=half, zl=op * mu0 / half, su=half, zu=op * mu0 / half,
              it=jnp.zeros((), jnp.int64), active=jnp.ones(R.shape[0], bool))
-    iters = int(ipm["iters"])
-    if ipm["adaptive"]:
-        v = jax.lax.while_loop(lambda c: (c["it"] < iters) & jnp.any(c["active"]), body, v)
-    else:
-        v = jax.lax.fori_loop(0, iters, lambda _, c: body(c), v)
-    metric = residuals(v)[-1]
+    v.update(best={k: v[k] for k in FIELDS}, best_metric=jnp.full(R.shape[0], jnp.inf))
+    v = ipm_loop(body, v, ipm)
+    last = residuals(v)[-1]
+    keep_last = last <= v["best_metric"]
+    v = dict(v, **{k: jnp.where(keep_last[:, None], v[k], v["best"][k]) for k in FIELDS})
+    metric = jnp.minimum(last, v["best_metric"])
     x = jnp.where(jnp.all(jnp.abs(v["x"]) < 1e-13, axis=1, keepdims=True), 0.0, v["x"])
-    return x, eqf * v["nu"] + gef * v["zg"], dict(ipm_res=jnp.max(metric), ipm_it=v["it"], ipm_state=v)
+    return x, eqf * v["nu"] + gef * v["zg"], dict(ipm_res=jnp.max(metric), metric=metric, ipm_it=v["it"], ipm_state=v)
+
+
+def ipm_loop(body, v, ipm):
+    """Runs an IPM's iterations: min_iters of them unconditionally, then until every edge has converged or iters is reached (adaptive), or iters in all. The adaptive loop reads one flag per iteration, which costs a host sync on a GPU (plan 15.5), so the iterations nearly every edge needs run without it. An edge that has converged stops moving, so extra iterations change nothing."""
+    iters = int(ipm["iters"])
+    first = min(int(ipm.get("min_iters", 0)), iters)
+    if first > 0:                                   # each loop traces the body once more, which costs compile time
+        v = jax.lax.fori_loop(0, first, lambda _, c: body(c), v)
+    if ipm["adaptive"]:
+        return jax.lax.while_loop(lambda c: (c["it"] < iters) & jnp.any(c["active"]), body, v)
+    return jax.lax.fori_loop(first, iters, lambda _, c: body(c), v)
+
+
+# ===== EDGE_SOLVERS: EDGE SDP =====
+# Plan 8.4 (solver.psd_coupling: edge). The edge step takes the moment matrix's PSD constraint inside:
+#   min 1/2 x^T diag(h) x + f^T x  over  edge_qp's rows and bounds  and  B(x) >= 0.
+# The split form (copies S, duals Lam) left the PSD coupling to the outer PDHG, and on the tiny
+# instance that coupling held most of the fixed-point residual, which the tree's vertex prices cannot
+# move. Here the outer problem couples edges through K alone, which is what the tree models.
+#
+# A batched Mehrotra predictor-corrector with the HKM direction (Helmberg-Rendl-Vanderbei-Wolkowicz,
+# Kojima-Shindoh-Hara, Monteiro), in the same sign conventions as edge_qp: stationarity is
+#   h x + f - R^T u - (bound terms) - B*(Z) = 0,  X = B(x) + Pad,  X, Z >= 0,  X Z = mu I.
+# Linearizing X Z = mu I and symmetrizing gives dZ = sym(X^-1 Rc) - sym(X^-1 dX Z), so the PSD block
+# adds M[k, l] = tr(B_k X^-1 B_l Z) to the Newton matrix: symmetric and positive definite, but dense,
+# so the arrow structure of edge_qp is lost and the matrix is factored whole (n x n, at most 91 at
+# order 1). The rows then go through the same row form as edge_qp. The matrix padding of a smaller
+# edge type is an identity block in both X and Z that never moves, so it adds nothing to B*(Z), to the
+# complementarity, or to the step length.
+
+SDP_FIELDS = FIELDS + ("X", "Z")
+
+
+def sdp_maps(d):
+    """Where each entry of m sits in the moment matrix (plan 5.1): one-hot rows (E, n, s) for the entry's row a and column b, zero for entries outside the edge's matrix, and the weight c (1/2 on the diagonal, 1 off it) with B(x) = sum_k x_k c_k (E_ab + E_ba)."""
+    E, n = d["adj"].shape
+    s = d["mat"].shape[1]
+    a, b = d["adj"] // s, d["adj"] % s
+    inside = ((d["adj_w"] > 0.0) & (jnp.take_along_axis(d["psd_mask"].reshape(E, -1), d["adj"], axis=1) > 0.0)).astype(jnp.float64)
+    ua = jax.nn.one_hot(a, s, dtype=jnp.float64) * inside[..., None]
+    ub = jax.nn.one_hot(b, s, dtype=jnp.float64) * inside[..., None]
+    return ua, ub, jnp.where(a == b, 0.5, 1.0) * inside
+
+
+def psd_newton(maps, P, Q):
+    """M[k, l] = tr(B_k P B_l Q) in the coordinates of m, for symmetric P and Q: with (a, b) the position of entry k and (c, e) that of entry l, c_k c_l (P_bc Q_ea + P_be Q_ca + P_ac Q_eb + P_ae Q_cb). With P = X^-1 and Q = Z it is the HKM term of the Newton matrix."""
+    ua, ub, c = maps
+    pa, pb, qa, qb = ua @ P, ub @ P, ua @ Q, ub @ Q
+    p_aa, p_ab, p_bb = pa @ swap(ua), pa @ swap(ub), pb @ swap(ub)
+    q_aa, q_ab, q_bb = qa @ swap(ua), qa @ swap(ub), qb @ swap(ub)
+    return c[:, :, None] * c[:, None, :] * (swap(p_ab) * q_ab + p_bb * q_aa + p_aa * q_bb + p_ab * swap(q_ab))
+
+
+def sdp_newton(d, h, v, maps):
+    """The edge SDP's Newton matrix at an iterate v (E, n, n): diag(h) plus the bounds' arrow part (edge_qp's H, written out) plus the PSD term. Also returns the Cholesky factor of X, X^-1 and the bounds' weights."""
+    lo, hi, e0 = d["lo"], d["hi"], d["e0"]
+    n, s = h.shape[1], v["X"].shape[-1]
+    dl, du = v["zl"] / v["sl"], v["zu"] / v["su"]
+    arrow = -(lo * dl + hi * du)                    # coupling of entry i to y = x[0]; zero at i = 0, whose bounds are closed
+    corner = jnp.sum(lo * lo * dl + hi * hi * du, axis=1)
+    H = (jnp.eye(n) * (h + dl + du)[:, None, :] + e0[None, :, None] * arrow[:, None, :] + arrow[:, :, None] * e0[None, None, :]
+         + (e0[:, None] * e0[None, :]) * corner[:, None, None])
+    lx = chol(v["X"])
+    linv = lower_solve(lx, jnp.broadcast_to(jnp.eye(s), v["X"].shape))
+    xinv = swap(linv) @ linv
+    return H + psd_newton(maps, xinv, v["Z"]), lx, xinv, dl, du
+
+
+def edge_sdp(d, h, f, ipm):
+    """The edge mode's step of every edge: (x (E, n), row multipliers u (E, r), PSD multiplier Z (E, s, s), stats). Same rows, bounds, signs and stopping rules as edge_qp, plus B(x) >= 0. An edge that has converged stops moving while the others finish."""
+    R = d["R"]
+    eqf, gef, padf, op, lo, hi, e0, n_ineq = d["row_eq"], d["row_ge"], d["row_pad"], d["open"], d["lo"], d["hi"], d["e0"], d["n_ineq"]
+    tol = float(ipm["tol"])
+    E, n = f.shape
+    s = d["mat"].shape[1]
+    pm = d["psd_mask"]
+    act = jnp.diagonal(pm, axis1=1, axis2=2)          # the rows of the edge's own matrix
+    eye_s = jnp.eye(s)
+    pad = eye_s * (1.0 - act)[:, None, :]
+    n_all = n_ineq + jnp.sum(act, axis=1)
+    maps = sdp_maps(d)
+    fnorm = 1.0 + jnp.max(jnp.abs(f), axis=1)
+    diag_r = jnp.eye(R.shape[1])
+
+    def residuals(v):
+        x, X, Z = v["x"], v["X"], v["Z"]
+        y = x[:, :1]
+        rx = mv(R, x)
+        cb = v["zl"] - v["zu"] + e0 * jnp.sum(hi * v["zu"] - lo * v["zl"], axis=1, keepdims=True)
+        rd = h * x + f - mtv(R, eqf * v["nu"] + gef * v["zg"]) - cb - psd_adjoint(d, pm * Z)
+        ra, rg = eqf * rx, gef * (rx - v["sg"])
+        rl, ru = op * (x - lo * y - v["sl"]), op * (hi * y - x - v["su"])
+        rX = psd_forward(d, x) + pad - X
+        mu = (jnp.sum(gef * v["sg"] * v["zg"], axis=1) + jnp.sum(v["sl"] * v["zl"] + v["su"] * v["zu"], axis=1) + jnp.sum(pm * X * Z, axis=(1, 2))) / n_all
+        prim = jnp.maximum(jnp.maximum(jnp.max(jnp.abs(ra) + jnp.abs(rg), axis=1), jnp.max(jnp.maximum(jnp.abs(rl), jnp.abs(ru)), axis=1)), jnp.max(jnp.abs(rX), axis=(1, 2)))
+        return rd, ra, rg, rl, ru, rX, mu, jnp.maximum(jnp.max(jnp.abs(rd), axis=1) / fnorm, jnp.maximum(prim, mu))
+
+    def mat_step(factor, dm):
+        """The longest step a with M + a dM >= 0, for M = L L^T: -1 / lambda_min(L^-1 dM L^-T), or inf."""
+        a = lower_solve(factor, dm)
+        lowest = jnp.linalg.eigvalsh(sym(lower_solve(factor, swap(a))))[:, 0]
+        return jnp.where(lowest < 0.0, -1.0 / lowest, jnp.inf)
+
+    def to_boundary(v, dv, lx, lz):
+        steps = [jnp.min(jnp.where(dv[k] < 0.0, -v[k] / dv[k], jnp.inf), axis=1) for k in SLACKS]
+        return jnp.min(jnp.stack(steps + [mat_step(lx, dv["X"]), mat_step(lz, dv["Z"])]), axis=0)
+
+    def body(v):
+        rd, ra, rg, rl, ru, rX, mu, metric = residuals(v)
+        better = metric < v["best_metric"]                 # best iterate, as in edge_qp
+        best = {k: pick(better, v[k], v["best"][k]) for k in SDP_FIELDS}
+        best_metric = jnp.minimum(metric, v["best_metric"])
+        sg, zg, sl, zl, su, zu, X, Z = (v[k] for k in SLACKS + ("X", "Z"))
+        zg_safe = zg + (1.0 - gef)
+        H, lx, xinv, dl, du = sdp_newton(d, h, v, maps)
+        lh, lz = chol(H), chol(Z)
+        hirt = factor_solve(lh, swap(R))                                     # H^-1 R^T (E, n, r)
+        factor = chol(R @ hirt + diag_r * (gef * sg / zg_safe + padf + 1e-14 * eqf)[:, None, :])
+        carry = xinv @ rX @ Z                                              # X^-1 rX Z, from the PSD block's own residual
+
+        def direction(rmg, rml, rmu, rc):
+            tl, tu = dl * rl + rml / sl, du * ru + rmu / su
+            t = xinv @ rc
+            rhs = (-rd - (tl - tu) - e0 * jnp.sum(hi * tu - lo * tl, axis=1, keepdims=True)
+                   + psd_adjoint(d, pm * sym(t)) - psd_adjoint(d, pm * sym(carry)))
+            hr = factor_solve(lh, rhs[..., None])[..., 0]
+            step = factor_solve(factor, (-ra - rg - gef * rmg / zg_safe - mv(R, hr))[..., None])[..., 0]
+            dx = hr + jnp.einsum("enr,er->en", hirt, (eqf + gef) * step)
+            dy = dx[:, :1]
+            dsl, dsu = op * (dx - lo * dy + rl), op * (hi * dy - dx + ru)
+            dX = psd_forward(d, dx) + rX
+            return dict(x=dx, nu=eqf * step, sg=gef * (mv(R, dx) + rg), zg=gef * step, sl=dsl, zl=op * (-rml - zl * dsl) / sl,
+                        su=dsu, zu=op * (-rmu - zu * dsu) / su, X=dX, Z=pm * sym(t - xinv @ dX @ Z))
+
+        rmg, rml, rmu = gef * sg * zg, sl * zl, su * zu
+        xz = X @ Z
+        affine = direction(rmg, rml, rmu, -pm * xz)
+        a_aff = jnp.minimum(1.0, to_boundary(v, affine, lx, lz))
+        a2, a3 = a_aff[:, None], a_aff[:, None, None]
+        mu_aff = (jnp.sum(gef * (sg + a2 * affine["sg"]) * (zg + a2 * affine["zg"]), axis=1)
+                  + jnp.sum((sl + a2 * affine["sl"]) * (zl + a2 * affine["zl"]) + (su + a2 * affine["su"]) * (zu + a2 * affine["zu"]), axis=1)
+                  + jnp.sum(pm * (X + a3 * affine["X"]) * (Z + a3 * affine["Z"]), axis=(1, 2))) / n_all
+        center = jnp.minimum(1.0, mu_aff / jnp.maximum(mu, 1e-300)) ** 3 * mu
+        c2 = center[:, None]
+        full = direction(rmg + gef * (affine["sg"] * affine["zg"] - c2), rml + affine["sl"] * affine["zl"] - op * c2,
+                         rmu + affine["su"] * affine["zu"] - op * c2, pm * (center[:, None, None] * eye_s - xz - affine["X"] @ affine["Z"]))
+        alpha = jnp.minimum(1.0, 0.995 * to_boundary(v, full, lx, lz))
+        finite = [full[k] for k in ("x", "nu", "zg", "X", "Z")] + [lx, lz]       # a failed factor of X or Z would hide the cone's boundary
+        sane = jnp.all(jnp.stack([jnp.all(jnp.isfinite(a), axis=tuple(range(1, a.ndim))) for a in finite]), axis=0)
+        go = (metric > tol) & sane & (mu > 1e-3 * tol) & (metric <= 1e3 * best_metric)    # edge_qp's stopping rules
+        move = jnp.where(go, alpha, 0.0)
+        new = {k: v[k] + move.reshape((-1,) + (1,) * (full[k].ndim - 1)) * jnp.where(jnp.isfinite(full[k]), full[k], 0.0) for k in full}
+        new.update(it=v["it"] + 1, active=go, best=best, best_metric=best_metric)
+        return new
+
+    # Start: edge_qp's point and slacks; X is B(x0) shifted to be safely positive definite (an infeasible
+    # start, so rX starts nonzero) and Z = mu0 X^-1, which puts the PSD block on the central path.
+    x0 = 0.5 * (lo + hi) * op + e0
+    half = jnp.where(op > 0.0, 0.5 * (hi - lo), 1.0)
+    mu0 = jnp.maximum(jnp.max(jnp.abs(h * x0 + f) * 2.0 * half, axis=1, keepdims=True), 1e-2)
+    rx0 = mv(R, x0)
+    sg0 = gef * jnp.maximum(rx0, 0.1 * (1.0 + jnp.abs(rx0))) + (1.0 - gef)
+    b0 = psd_forward(d, x0) + pad
+    lowest = jnp.linalg.eigvalsh(b0)[:, 0]
+    top = jnp.max(jnp.abs(jnp.diagonal(b0, axis1=1, axis2=2)) * act, axis=1)
+    shift = jnp.maximum(-lowest, 0.0) + 0.1 * jnp.maximum(top, 1.0)
+    X0 = b0 + (shift[:, None] * act)[:, None, :] * eye_s
+    linv0 = lower_solve(chol(X0), jnp.broadcast_to(eye_s, X0.shape))
+    Z0 = pm * (mu0[:, :, None] * (swap(linv0) @ linv0)) + pad
+    v = dict(x=x0, nu=jnp.zeros_like(rx0), sg=sg0, zg=gef * mu0 / sg0, sl=half, zl=op * mu0 / half, su=half, zu=op * mu0 / half, X=X0, Z=Z0,
+             it=jnp.zeros((), jnp.int64), active=jnp.ones(E, bool))
+    v.update(best={k: v[k] for k in SDP_FIELDS}, best_metric=jnp.full(E, jnp.inf))
+    v = ipm_loop(body, v, ipm)
+    last = residuals(v)[-1]
+    keep_last = last <= v["best_metric"]
+    v = dict(v, **{k: pick(keep_last, v[k], v["best"][k]) for k in SDP_FIELDS})
+    metric = jnp.minimum(last, v["best_metric"])
+    x = jnp.where(jnp.all(jnp.abs(v["x"]) < 1e-13, axis=1, keepdims=True), 0.0, v["x"])
+    return x, eqf * v["nu"] + gef * v["zg"], pm * v["Z"], dict(ipm_res=jnp.max(metric), metric=metric, ipm_it=v["it"], ipm_state=v)
 
 
 # ===== CERTIFICATE =====
@@ -789,19 +1008,26 @@ def edge_qp(d, h, f, ipm):
 # Gamma is the negative part of the matrix the PSD step just decomposed, divided by its step. The plan
 # says Pi(-Lam): any PSD matrix is valid, this one tends to -Lam at convergence, and it needs no second
 # eigendecomposition. It is built from the negative eigenvalues alone, so it is PSD to rounding relative
-# to its own size, whatever the size of the positive part. Flow prices are left out, since they cancel
-# along a start-goal path.
+# to its own size, whatever the size of the positive part. In the edge mode (plan 8.4) there is no PSD
+# step: Gamma is the edge step's own PSD multiplier Z, projected onto the PSD cone the same way. Flow
+# prices are left out, since they cancel along a start-goal path. The zero test of plan 9.1 is the same
+# bound at the edge step's own data, with the multipliers of the edge's last solve.
 
-def edge_bounds(d, p, u, gamma):
-    """(each edge's bound, the state prices), with the forward-error allowance of tex Prop signed error: eps_cert times the size of every term, taken before any cancel, since cancellation is where roundoff hides. The same allowance covers the sum along a path, since it exceeds N u |bound|. A bound that is not finite says nothing, so it becomes -inf, which is valid."""
-    lam = p * d["state_mask"]
-    r = d["c"] + k_adjoint(d, lam) - mtv(d["R"], u) - psd_adjoint(d, gamma)
+def cone_bound(d, g, size, u, gamma):
+    """A lower bound on min g^T m over each edge's outer set at m_0 = 1, for any multipliers u (>= 0 on inequality rows) and PSD gamma, with the forward-error allowance of tex Prop signed error: eps_cert times the size of every term, taken before any cancel, since cancellation is where roundoff hides. `size` holds the sizes of g's own terms. The same allowance covers the sum along a path, since it exceeds N u |bound|. A bound that is not finite says nothing, so it becomes -inf, which is valid."""
+    r = g - mtv(d["R"], u) - psd_adjoint(d, gamma)
     terms = jnp.minimum(r * d["lo"], r * d["hi"]) * d["wm"]
-    size = jnp.abs(d["c"]) + k_adjoint_size(d, lam) + mtv(jnp.abs(d["R"]), jnp.abs(u)) + psd_adjoint(d, jnp.abs(gamma))
+    size = size + mtv(jnp.abs(d["R"]), jnp.abs(u)) + psd_adjoint(d, jnp.abs(gamma))
     reach = jnp.maximum(jnp.abs(d["lo"]), jnp.abs(d["hi"])) * d["wm"]
     slack = d["eps_cert"] * (1.0 + size[:, 0] + jnp.sum(size * reach, axis=1) + jnp.sqrt(jnp.sum(gamma * gamma, axis=(1, 2))) * d["trace_hi"])
     lb = r[:, 0] + jnp.sum(terms, axis=1) - slack
-    return jnp.where(jnp.isfinite(lb), lb, -jnp.inf), lam
+    return jnp.where(jnp.isfinite(lb), lb, -jnp.inf)
+
+
+def edge_bounds(d, p, u, gamma):
+    """(each edge's bound, the state prices): cone_bound at g = c + K^T (0, lambda), with no center term and no Lam term (plan 10.1)."""
+    lam = p * d["state_mask"]
+    return cone_bound(d, d["c"] + k_adjoint(d, lam), jnp.abs(d["c"]) + k_adjoint_size(d, lam), u, gamma), lam
 
 
 def free_bound(d, p, u, gamma):
@@ -815,47 +1041,67 @@ def free_bound(d, p, u, gamma):
 
 
 # ===== PDHG =====
-# Plan 7. One round is Chambolle-Pock on the saddle problem with the Lagrangian term <Lam, B(m) - S>
-# and <p, K m - b>. At a solution -Lam is PSD. theta is the primal/dual balance: T scales with it and
-# Sigma with its inverse, so it is a value in the state and changing it needs no recompile.
+# Plan 7. One round is Chambolle-Pock on the saddle problem with the term <p, K m - b> and, in the split
+# mode, the Lagrangian term <Lam, B(m) - S> (at a solution -Lam is PSD). In the edge mode (plan 8.4) the
+# PSD constraint is part of each edge's set, so z = (m, p) and K is the whole operator. theta is the
+# primal/dual balance: T scales with it and Sigma with its inverse, so it is a value in the state and
+# changing it needs no recompile.
+#
+# A round also reads `aux`, the multipliers of each edge's last solve (u, and gamma in the edge mode).
+# The zero test uses them to skip edges whose step is exactly zero (plan 9.1), so they change which
+# edges are solved and never the result: any multipliers in their cones give a valid test.
 
 def scalar(x):
     return jnp.asarray(x, dtype=jnp.float64)
 
 
-def pdhg_step(d, z, theta, ipm):
-    """One round from z = (m, S, Lam, p): (next z, the multipliers and stats of the round)."""
+def step_data(d, z, theta):
+    """The edge step's data at z: (h = 1 / t, the linear term f = c + K^T p (+ B*(Lam)) - m / t, and the sizes of f's terms before they cancel, for the zero test's rounding allowance)."""
     t = d["T"] * theta
-    t_s = d["t_s"] * theta
-    sig_p, sig_l = d["sig_p"] / theta, d["sig_l"] / theta
-    g = d["c"] + k_adjoint(d, z["p"]) + psd_adjoint(d, z["Lam"])
-    m, u, stats = edge_qp(d, 1.0 / t, g - z["m"] / t, ipm)
-    x = z["S"] + t_s * z["Lam"]
-    w, vec = jnp.linalg.eigh(x)
-    s = (vec * jnp.maximum(w, 0.0)[:, None, :]) @ swap(vec)
+    g = d["c"] + k_adjoint(d, z["p"])
+    size = jnp.abs(d["c"]) + k_adjoint_size(d, z["p"]) + jnp.abs(z["m"]) / t
+    if "Lam" in z:
+        g = g + psd_adjoint(d, z["Lam"])
+        size = size + psd_adjoint(d, jnp.abs(z["Lam"]))
+    return 1.0 / t, g - z["m"] / t, size
+
+
+def pdhg_step(d, z, aux, theta, ss, response=False):
+    """One round from z = (m, p), or (m, S, Lam, p) in the split mode: (next z, the multipliers and stats of the round). With response, also each edge's K_e J_e K_e^T for the tree."""
+    sig_p = d["sig_p"] / theta
+    h, f, size = step_data(d, z, theta)
+    step = edge_step(d, h, f, size, aux, ss, response)
+    m = step["x"]
     m_bar = 2.0 * m - z["m"]
     moved = z["p"] + sig_p * (k_forward(d, m_bar) - d["b"])
     p = jnp.where(d["is_flow"], moved, jnp.sign(moved) * jnp.maximum(jnp.abs(moved) - sig_p * d["delta"], 0.0))
+    extra = dict(u=step["u"], gamma=step["gamma"], ipm_res=step["res"], ipm_it=step["it"], solved=step["solved"], response=step["response"])
+    if ss["psd"] == "edge":
+        return dict(m=m, p=p), extra
+    t_s, sig_l = d["t_s"] * theta, d["sig_l"] / theta
+    x = z["S"] + t_s * z["Lam"]
+    w, vec = jnp.linalg.eigh(x)
+    s = (vec * jnp.maximum(w, 0.0)[:, None, :]) @ swap(vec)
     lam = z["Lam"] + sig_l * (psd_forward(d, m_bar) - (2.0 * s - z["S"]))
-    gamma = (vec * jnp.maximum(-w, 0.0)[:, None, :]) @ swap(vec) / t_s
-    return dict(m=m, S=s, Lam=lam, p=p), dict(u=u, gamma=gamma, **stats)
+    extra["gamma"] = (vec * jnp.maximum(-w, 0.0)[:, None, :]) @ swap(vec) / t_s
+    return dict(m=m, S=s, Lam=lam, p=p), extra
 
 
 def p_inner(d, a, b, theta):
-    """<a, b>_P in the metric that makes a round firmly nonexpansive (plan 11.6, tex Lemma 4.3), with P = [T^-1, -A^T; -A, Sigma^-1] and A the whole operator (K m, B(m) - S). A row with no coefficients has Sigma = 0 and its dual never moves, so it counts for nothing."""
-    t, t_s = d["T"] * theta, d["t_s"] * theta
-    sig_p, sig_l = d["sig_p"] / theta, d["sig_l"] / theta
-    plain = (jnp.sum(a["m"] * b["m"] / t) + jnp.sum(a["S"] * b["S"]) / t_s
-             + jnp.sum(jnp.where(sig_p > 0.0, a["p"] * b["p"] / jnp.where(sig_p > 0.0, sig_p, 1.0), 0.0))
-             + jnp.sum(jnp.where(sig_l > 0.0, a["Lam"] * b["Lam"] / jnp.where(sig_l > 0.0, sig_l, 1.0), 0.0)))
-    cross = (jnp.sum(k_forward(d, a["m"]) * b["p"]) + jnp.sum((psd_forward(d, a["m"]) - a["S"]) * b["Lam"])
-             + jnp.sum(k_forward(d, b["m"]) * a["p"]) + jnp.sum((psd_forward(d, b["m"]) - b["S"]) * a["Lam"]))
+    """<a, b>_P in the metric that makes a round firmly nonexpansive (plan 11.6, tex Lemma 4.3), with P = [T^-1, -A^T; -A, Sigma^-1] and A the whole operator: K m, plus B(m) - S in the split mode. A row with no coefficients has Sigma = 0 and its dual never moves, so it counts for nothing."""
+    t, sig_p = d["T"] * theta, d["sig_p"] / theta
+    plain = jnp.sum(a["m"] * b["m"] / t) + jnp.sum(jnp.where(sig_p > 0.0, a["p"] * b["p"] / jnp.where(sig_p > 0.0, sig_p, 1.0), 0.0))
+    cross = jnp.sum(k_forward(d, a["m"]) * b["p"]) + jnp.sum(k_forward(d, b["m"]) * a["p"])
+    if "S" in a:
+        t_s, sig_l = d["t_s"] * theta, d["sig_l"] / theta
+        plain = plain + jnp.sum(a["S"] * b["S"]) / t_s + jnp.sum(jnp.where(sig_l > 0.0, a["Lam"] * b["Lam"] / jnp.where(sig_l > 0.0, sig_l, 1.0), 0.0))
+        cross = cross + jnp.sum((psd_forward(d, a["m"]) - a["S"]) * b["Lam"]) + jnp.sum((psd_forward(d, b["m"]) - b["S"]) * a["Lam"])
     return plain - cross
 
 
-def fixed_point_residual(d, z, theta, ipm):
+def fixed_point_residual(d, z, aux, theta, ss):
     """||z - T(z)||_P: the KKT error used for restarts (plan 7.4). It is zero exactly at a saddle point, and it needs no projection onto the normal cones of the edge polytopes."""
-    next_z, _ = pdhg_step(d, z, theta, ipm)
+    next_z, _ = pdhg_step(d, z, aux, theta, ss)
     res = {k: z[k] - next_z[k] for k in z}
     return jnp.sqrt(jnp.maximum(p_inner(d, res, res, theta), 0.0))
 
@@ -874,62 +1120,90 @@ def candidate_stats(d, z):
                 psd=jnp.max(-jnp.linalg.eigvalsh(b_m)[:, 0] / (1.0 + norm)))
 
 
-def initial_state(d, theta):
-    """Cold start: zeros (plan 12.1)."""
+def initial_state(d, theta, ss):
+    """Cold start: zeros (plan 12.1), with no stored multipliers. Zero multipliers are valid, so the first zero test uses the bounds alone."""
     E, r = d["c"].shape[0], d["R"].shape[1]
-    zero = dict(m=jnp.zeros_like(d["c"]), S=jnp.zeros_like(d["sig_l"]), Lam=jnp.zeros_like(d["sig_l"]), p=jnp.zeros_like(d["b"]))
+    zero = dict(m=jnp.zeros_like(d["c"]), p=jnp.zeros_like(d["b"]))
+    if ss["psd"] == "split":
+        zero.update(S=jnp.zeros_like(d["sig_l"]), Lam=jnp.zeros_like(d["sig_l"]))
     return dict(z=zero, avg=zero, count=scalar(0.0), theta=scalar(theta), l0_best=scalar(-np.inf), ld_best=scalar(-np.inf), ipm_res=scalar(0.0),
-                ipm_it=jnp.zeros((), jnp.int64), u=jnp.zeros((E, r)), gamma=jnp.zeros_like(d["sig_l"]))
+                ipm_it=jnp.zeros((), jnp.int64), solved=scalar(0.0), u=jnp.zeros((E, r)), gamma=jnp.zeros_like(d["sig_l"]))
+
+
+def aux_of(state):
+    """The multipliers a round reads: from each edge's last solve, for the zero test, and the free bound's between rounds."""
+    return dict(u=state["u"], gamma=state["gamma"])
+
+
+def solver_settings(cfg, d):
+    """What a round needs from the config as plain values (static under jit): where the PSD constraint lives, both IPMs' settings, and skipping (plan 9) with its bucket sizes for d's edge count."""
+    sc, sk = cfg["solver"], cfg["skipping"]
+    E = int(d["c"].shape[0])
+    buckets = sorted({0, E} | {int(b) for b in sk.get("buckets", []) if 0 < int(b) < E})
+    return dict(psd=psd_coupling(cfg), ipm=dict(sc["ipm"]), ipm_sdp=dict(sc.get("ipm_sdp", sc["ipm"])), zero_test=bool(sk["zero_test"]),
+                lb_tol=float(sk["lb_tol"]), compaction=str(sk["compaction"]), buckets=tuple(buckets))
 
 
 def check_settings_built(cfg):
     """Stops a run that asks for something the solver does not do yet. It would otherwise run something else under that name, and comparisons against it would mean nothing."""
+    psd_coupling(cfg)
+    if cfg["solver"].get("theta_psd", "same") != "same":
+        raise NotImplementedError("solver.theta_psd is not wired into the step sizes: every round uses theta_pd for the PSD rows too")
     proj = cfg["solver"]["psd_proj"]
     if proj not in ("auto", "eigh"):
-        raise NotImplementedError(f"solver.psd_proj {proj!r} is not wired into the solver yet: every round uses eigh (plan 8.2)")
+        raise NotImplementedError(f"solver.psd_proj {proj!r} is not wired into the solver yet: the split mode uses eigh, and the edge mode has no projection (plan 8.2, 8.4)")
     sk = cfg["skipping"]
-    asked = [k for k in ("zero_test", "face_cache", "gershgorin_skip") if sk[k]] + ([] if sk["compaction"] == "none" else ["compaction"])
+    asked = [k for k in ("face_cache", "gershgorin_skip") if sk[k]]
     if asked:
-        raise NotImplementedError(f"skipping comes at M5, but this run asks for {asked}: every edge runs its IPM every round (plan 9)")
+        raise NotImplementedError(f"skipping.{asked} is not built: the zero test and compaction are (plan 9). The face cache is exact only for polyhedral steps, "
+                                  "so it cannot serve the edge mode's SDP step, and the Gershgorin skip only saves eigh calls in the split mode")
+    if sk["compaction"] not in ("none", "bucketed"):
+        raise ValueError(f"skipping.compaction must be none or bucketed, not {sk['compaction']!r}")
+    if int(cfg["certificate"]["free_every"]) < 1:
+        raise ValueError("certificate.free_every must be at least 1")
 
 
 def compile_solver(cfg, d):
-    """Ahead-of-time compiled pieces (plan 7.5): one scan block, the block-end diagnostics, the restart residual and, with a tree, its direction and trial. A tree runs between blocks, so a block is then tree.every rounds. Returns (pieces, seconds)."""
+    """Ahead-of-time compiled pieces (plan 7.5): one scan block, the block-end diagnostics, the restart residual and, with a tree, its direction and trial. A tree runs between blocks, so a block is then tree.every rounds. The free bound runs every certificate.free_every rounds, which must divide a block. Returns (pieces, seconds)."""
     check_settings_built(cfg)
     sc = cfg["solver"]
+    ss = solver_settings(cfg, d)
     tree = tree_settings(cfg)
-    ipm, rounds = dict(sc["ipm"]), int(cfg["tree"]["every"]) if tree else int(sc["rounds_per_scan"])
-    in_round = int(cfg["certificate"]["free_every"]) == 1
+    rounds = int(cfg["tree"]["every"]) if tree else int(sc["rounds_per_scan"])
+    every = int(cfg["certificate"]["free_every"])
+    if rounds % every:
+        raise ValueError(f"certificate.free_every {every} must divide the {rounds} rounds of a scan block")
 
     def block_fn(data, state):
         def one(st, _):
-            z, extra = pdhg_step(data, st["z"], st["theta"], ipm)
+            z, extra = pdhg_step(data, st["z"], aux_of(st), st["theta"], ss)
             count = st["count"] + 1.0
             avg = jax.tree_util.tree_map(lambda a, b: a + (b - a) / count, st["avg"], z)
-            new = dict(st, z=z, avg=avg, count=count, u=extra["u"], gamma=extra["gamma"], ipm_res=jnp.maximum(st["ipm_res"], extra["ipm_res"]),
-                       ipm_it=jnp.maximum(st["ipm_it"], extra["ipm_it"]))
-            if in_round:
-                l0, ld = free_bound(data, z["p"], extra["u"], extra["gamma"])
-                new.update(l0_best=jnp.maximum(st["l0_best"], l0), ld_best=jnp.maximum(st["ld_best"], ld))
-            return new, None
+            return dict(st, z=z, avg=avg, count=count, u=extra["u"], gamma=extra["gamma"], ipm_res=jnp.maximum(st["ipm_res"], extra["ipm_res"]),
+                        ipm_it=jnp.maximum(st["ipm_it"], extra["ipm_it"]), solved=st["solved"] + extra["solved"]), None
 
-        state, _ = jax.lax.scan(one, state, None, length=rounds)
-        if not in_round:
-            l0, ld = free_bound(data, state["z"]["p"], state["u"], state["gamma"])
-            state = dict(state, l0_best=jnp.maximum(state["l0_best"], l0), ld_best=jnp.maximum(state["ld_best"], ld))
-        return state
+        def group(st, _):
+            # Any prices and multipliers give a valid bound, so the running maximum over every
+            # free_every-th round is valid too; it costs N sequential steps, so not every round.
+            st, _ = jax.lax.scan(one, st, None, length=every)
+            l0, ld = free_bound(data, st["z"]["p"], st["u"], st["gamma"])
+            return dict(st, l0_best=jnp.maximum(st["l0_best"], l0), ld_best=jnp.maximum(st["ld_best"], ld)), None
+
+        return jax.lax.scan(group, state, None, length=rounds // every)[0]
 
     def diag_fn(data, state):
+        aux = aux_of(state)
         return dict(cur=candidate_stats(data, state["z"]), avg=candidate_stats(data, state["avg"]),
-                    e_cur=fixed_point_residual(data, state["z"], state["theta"], ipm), e_avg=fixed_point_residual(data, state["avg"], state["theta"], ipm))
+                    e_cur=fixed_point_residual(data, state["z"], aux, state["theta"], ss), e_avg=fixed_point_residual(data, state["avg"], aux, state["theta"], ss))
 
-    state = initial_state(d, 1.0)
+    state = initial_state(d, 1.0, ss)
+    aux = aux_of(state)
     t0 = time.perf_counter()
     pieces = dict(block=jax.jit(block_fn).lower(d, state).compile(), diag=jax.jit(diag_fn).lower(d, state).compile(),
-                  residual=jax.jit(lambda data, z, th: fixed_point_residual(data, z, th, ipm)).lower(d, state["z"], state["theta"]).compile(), block_rounds=rounds)
+                  residual=jax.jit(lambda data, z, a, th: fixed_point_residual(data, z, a, th, ss)).lower(d, state["z"], aux, state["theta"]).compile(), block_rounds=rounds)
     if tree:
-        pieces.update(direction=jax.jit(lambda data, z, th: tree_direction(data, z, th, ipm, tree)).lower(d, state["z"], state["theta"]).compile(),
-                      trial=jax.jit(lambda data, z, dp, tau, th: tree_trial(data, z, dp, tau, th, ipm)).lower(d, state["z"], state["z"]["p"], state["theta"], state["theta"]).compile())
+        pieces.update(direction=jax.jit(lambda data, z, a, th: tree_direction(data, z, a, th, ss, tree)).lower(d, state["z"], aux, state["theta"]).compile(),
+                      trial=jax.jit(lambda data, z, a, dp, tau, th: tree_trial(data, z, a, dp, tau, th, ss)).lower(d, state["z"], aux, state["z"]["p"], state["theta"], state["theta"]).compile())
     return pieces, time.perf_counter() - t0
 
 
@@ -942,11 +1216,13 @@ def run_pdhg(cfg, d, pieces, theta, rounds_max, time_budget, stall_rounds, eta, 
     stop = sc["stop"]
     strict, flat = stop["strict"], stop["plateau"]
     delta, eps_flow, eps_psd, eps_row = float(sc["delta"]), float(stop["eps_flow"]), float(stop["eps_psd"]), float(stop["eps_row"])
+    below = float(stop.get("below_rel", 0.01))
     beta_s, beta_n, beta_a = float(sc["restarts"]["beta_sufficient"]), float(sc["restarts"]["beta_necessary"]), float(sc["restarts"]["beta_artificial"])
     adapt = sc["primal_weight_update"] == "pdlp"
-    state = initial_state(d, theta)
+    state = initial_state(d, theta, solver_settings(cfg, d))
+    E = int(d["c"].shape[0])
     z_restart = state["z"]
-    err_restart = float(pieces["residual"](d, state["z"], state["theta"]))
+    err_restart = float(pieces["residual"](d, state["z"], aux_of(state), state["theta"]))
     first_err, prev_candidate, restarts = err_restart, np.inf, 0
     rounds, epoch_start, status, best_u, last_print = 0, 0, None, np.inf, 0.0
     best_seen, best_round = (-np.inf, np.inf), 0
@@ -960,17 +1236,19 @@ def run_pdhg(cfg, d, pieces, theta, rounds_max, time_budget, stall_rounds, eta, 
     tree_log = open(Path(log_path).with_name("tree.jsonl"), "w") if log_path and guard is not None else None
     t0 = time.perf_counter()
     while status is None:
-        ipm_res, ipm_it = 0.0, 0
+        ipm_res, ipm_it, solved = 0.0, 0, 0.0
         for _ in range(blocks):
-            state = dict(state, ipm_res=scalar(0.0), ipm_it=jnp.zeros((), jnp.int64))
+            state = dict(state, ipm_res=scalar(0.0), ipm_it=jnp.zeros((), jnp.int64), solved=scalar(0.0))
             state = pieces["block"](d, state)
             rounds += block_rounds
+            solved += float(state["solved"])           # edge steps the zero test left to the IPM, ordinary rounds only (plan 9.4)
             if guard is not None:
                 state, used = tree_attempt(cfg["tree"]["safeguard"], d, pieces, state, guard)
                 rounds += used
                 if tree_log:
                     tree_log.write(json.dumps(dict(round=rounds, **guard["last"])) + "\n")
             ipm_res, ipm_it = max(ipm_res, float(state["ipm_res"])), max(ipm_it, int(state["ipm_it"]))
+        solved_share = solved / (blocks * block_rounds * E)
         jax.block_until_ready(state["z"]["m"])
         diag = jax.device_get(pieces["diag"](d, state))
         now = time.perf_counter() - t0
@@ -979,15 +1257,22 @@ def run_pdhg(cfg, d, pieces, theta, rounds_max, time_budget, stall_rounds, eta, 
         candidates = (diag["cur"], diag["avg"])
         passing = [c for c in candidates if passes(c, eps_flow, eps_psd, eps_row)]
         u = min((float(c["U"]) for c in passing), default=np.inf)
-        best_u = min(best_u, u)
         gap = (u - ld) / max(abs(u), 1e-12) if passing else np.inf
+        # A candidate that costs clearly less than the certified bound is infeasible beyond what the
+        # tolerances admit, so it neither stops the solve nor counts as the reported flow cost.
+        # U_flow is the latest plausible cost, not the minimum over history: early flows pass the loose
+        # tolerances while costing far below the bound that later rounds certify.
+        plausible = passing and gap >= -below
+        if plausible:
+            best_u = u
         exact = [float(c["U"]) for c in candidates if passes(c, float(strict["flow"]), float(strict["psd"]), float(strict["row"]))]
         if exact:
             below_l = max(below_l, ld - min(exact))
             if ld - min(exact) > 1e-5 * max(1.0, abs(ld)):
                 raise RuntimeError(f"round {rounds}: a feasible flow costs {min(exact)} but the certified bound is {ld}: a bug in the bound or the checks (plan 10.5)")
-        if ld > best_seen[0] + 1e-6 * max(1.0, abs(ld)) or u < best_seen[1] - 1e-6 * max(1.0, abs(u)):
-            best_seen, best_round = (max(best_seen[0], ld), min(best_seen[1], u)), rounds
+        u_seen = u if plausible else np.inf
+        if ld > best_seen[0] + 1e-6 * max(1.0, abs(ld)) or u_seen < best_seen[1] - 1e-6 * max(1.0, abs(u_seen)):
+            best_seen, best_round = (max(best_seen[0], ld), min(best_seen[1], u_seen)), rounds
         seen_rounds.append(rounds)
         seen_bounds.append(ld)
         earlier = bisect.bisect_left(seen_rounds, (1.0 - float(flat["window"])) * rounds)
@@ -995,7 +1280,7 @@ def run_pdhg(cfg, d, pieces, theta, rounds_max, time_budget, stall_rounds, eta, 
                      and ld - seen_bounds[earlier] < float(flat["gain"]) * ld)     # all costs are nonnegative, so a bound at or below zero says nothing yet
         if not math.isfinite(float(diag["cur"]["U"])):
             status = "diverged"
-        elif eta >= 0.0 and abs(gap) <= eta:     # either side: an infeasible iterate can cost well below L
+        elif eta >= 0.0 and plausible and gap <= eta:     # U above L, or below it only by `below`: crossing from below is not convergence
             status = "converged_eta"
         elif flattened:
             status = "plateau"
@@ -1017,13 +1302,13 @@ def run_pdhg(cfg, d, pieces, theta, rounds_max, time_budget, stall_rounds, eta, 
             z = state["avg"] if use_avg else state["z"]
             th = state["theta"]
             if adapt:
-                dx = math.sqrt(float(jnp.sum((z["m"] - z_restart["m"]) ** 2) + jnp.sum((z["S"] - z_restart["S"]) ** 2)))
-                dy = math.sqrt(float(jnp.sum((z["p"] - z_restart["p"]) ** 2) + jnp.sum((z["Lam"] - z_restart["Lam"]) ** 2)))
+                dx = math.sqrt(sum(float(jnp.sum((z[k] - z_restart[k]) ** 2)) for k in ("m", "S") if k in z))
+                dy = math.sqrt(sum(float(jnp.sum((z[k] - z_restart[k]) ** 2)) for k in ("p", "Lam") if k in z))
                 if dx > 1e-10 and dy > 1e-10:
                     th = scalar(1.0 / math.exp(0.5 * math.log(dy / dx) + 0.5 * math.log(1.0 / float(th))))
             state = dict(state, z=z, avg=z, count=scalar(0.0), theta=th)
             z_restart = z
-            err_restart = float(pieces["residual"](d, z, th)) if adapt else candidate_err
+            err_restart = float(pieces["residual"](d, z, aux_of(state), th)) if adapt else candidate_err
             prev_candidate, restarted, epoch_start = np.inf, True, rounds
             restarts += 1
             if guard is not None:
@@ -1031,7 +1316,7 @@ def run_pdhg(cfg, d, pieces, theta, rounds_max, time_budget, stall_rounds, eta, 
         else:
             prev_candidate = candidate_err
         line = dict(round=rounds, seconds=now, L_delta=ld, L_0=l0, U_flow=u, gap=gap, kkt_cur=e_cur, kkt_avg=e_avg, err_restart=err_restart, restarted=restarted, restarts=restarts,
-                    theta=float(state["theta"]), ipm_res=ipm_res, ipm_it=ipm_it, cur={k: float(v) for k, v in diag["cur"].items()}, avg={k: float(v) for k, v in diag["avg"].items()}, tree=guard)
+                    theta=float(state["theta"]), ipm_res=ipm_res, ipm_it=ipm_it, solved_share=solved_share, cur={k: float(v) for k, v in diag["cur"].items()}, avg={k: float(v) for k, v in diag["avg"].items()}, tree=guard)
         if log:
             log.write(json.dumps(line) + "\n")
         if progress and (now - last_print >= float(sc["log_every_s"]) or status):
@@ -1043,7 +1328,7 @@ def run_pdhg(cfg, d, pieces, theta, rounds_max, time_budget, stall_rounds, eta, 
                 tree_note = (f"  tree {guard['attempts']} tried, {guard['accepted_k1']} + {guard['accepted_k2']} kept, {guard['fallback']} fell back, {guard['rejected_ipm']} tries rejected;"
                              f" last step {last['d_ratio']:.1f} x residual, largest price change {last['dp_max']:.1e}, residual ratio per try {ratios}")
             print(f"  round {rounds:7d} {now:8.1f} s  {1e3 * now / rounds:8.3f} ms/round  L_delta {ld:.6f}  U_cur {float(diag['cur']['U']):.6f}  U_ok {u:.6f}  flow {float(diag['cur']['flow']):.1e}  state {float(diag['cur']['state']):.1e}"
-                  f"  psd {float(diag['cur']['psd']):.1e}  kkt {candidate_err:.2e}  restarts {restarts}  ipm its {ipm_it} res {ipm_res:.1e}" + tree_note, flush=True)
+                  f"  psd {float(diag['cur']['psd']):.1e}  kkt {candidate_err:.2e}  restarts {restarts}  ipm its {ipm_it} res {ipm_res:.1e}  solved {solved_share:.0%}" + tree_note, flush=True)
     if log:
         log.close()
     if tree_log:
@@ -1057,11 +1342,11 @@ def run_pdhg(cfg, d, pieces, theta, rounds_max, time_budget, stall_rounds, eta, 
 
 
 def choose_theta(cfg, d, pieces, label):
-    """The primal/dual balance (plan 7.3): a number from the config, or the grid value with the smallest error after the same short run, stored per configuration and task."""
+    """The primal/dual balance (plan 7.3): a number from the config, or the grid value with the smallest error after the same short run, stored per configuration, PSD coupling and task (the two couplings have different step sizes, so one's value says nothing about the other)."""
     sc = cfg["solver"]
     if sc["theta_pd"] != "auto":
         return float(sc["theta_pd"])
-    path = ROOT / cfg["output"]["root"] / "tuned" / f"{label}_{cfg['task']}.yaml"
+    path = ROOT / cfg["output"]["root"] / "tuned" / f"{label}_{psd_coupling(cfg)}_{cfg['task']}.yaml"
     if path.exists():
         return float(yaml.safe_load(path.read_text())["theta_pd"])
     t0 = time.perf_counter()
@@ -1078,33 +1363,112 @@ def choose_theta(cfg, d, pieces, label):
 
 
 def component_times(cfg, d, state):
-    """One-off timings of a round's and a tree pass's pieces at a real state, for finding the hot spot: each compiled and run alone, so launch overhead is not shared as it is in the scan."""
-    ipm = dict(cfg["solver"]["ipm"])
-    z, theta = state["z"], state["theta"]
-    t = d["T"] * theta
-    g = d["c"] + k_adjoint(d, z["p"]) + psd_adjoint(d, z["Lam"])
-    h, f = 1.0 / t, g - z["m"] / t
-    pieces = dict(edge_qp=(lambda a, b: edge_qp(d, a, b, ipm), (h, f)), eigh=(jnp.linalg.eigh, (z["S"] + d["t_s"] * theta * z["Lam"],)), k_forward=(lambda m: k_forward(d, m), (z["m"],)),
-                  k_adjoint=(lambda p: k_adjoint(d, p), (z["p"],)), psd_adjoint=(lambda lam: psd_adjoint(d, lam), (z["Lam"],)),
-                  free_bound=(lambda p, u, gamma: free_bound(d, p, u, gamma), (z["p"], state["u"], state["gamma"])), round=(lambda st: pdhg_step(d, st, theta, ipm), (z,)))
+    """One-off timings of a round's and a tree pass's pieces at a real state, for finding the hot spot: each compiled and run alone, so launch overhead is not shared as it is in the scan. edge_step is the edges' work with skipping as configured; edge_solve_all solves every edge, which is what skipping saves against."""
+    ss = solver_settings(cfg, d)
+    z, theta, aux = state["z"], state["theta"], aux_of(state)
+    h, f, size = step_data(d, z, theta)
+    pieces = dict(edge_step=(lambda a, b, c: edge_step(d, a, b, c, aux, ss)["x"], (h, f, size)), edge_solve_all=(lambda a, b: edge_solve(d, a, b, ss, False)["x"], (h, f)),
+                  k_forward=(lambda m: k_forward(d, m), (z["m"],)), k_adjoint=(lambda p: k_adjoint(d, p), (z["p"],)),
+                  free_bound=(lambda p, u, gamma: free_bound(d, p, u, gamma), (z["p"], state["u"], state["gamma"])), round=(lambda st: pdhg_step(d, st, aux, theta, ss)[0], (z,)))
+    if "Lam" in z:
+        pieces.update(eigh=(jnp.linalg.eigh, (z["S"] + d["t_s"] * theta * z["Lam"],)), psd_adjoint=(lambda lam: psd_adjoint(d, lam), (z["Lam"],)))
     times = {name: timed(fn, *args)[0] * 1e3 for name, (fn, args) in pieces.items()}
     tree = tree_settings(cfg)
     if tree:
-        v = jax.jit(lambda a, b: edge_qp(d, a, b, ipm))(h, f)[2]["ipm_state"]
-        wall, _, response = timed(lambda a, b: edge_response(d, a, b), h, v)
-        times["edge_response"] = wall * 1e3
-        wall, _, (D, E) = timed(lambda a: tree_assemble(d, a), response)
+        wall, _, extra = timed(lambda st: pdhg_step(d, st, aux, theta, ss, response=True)[1], z)
+        times["round_with_response"] = wall * 1e3
+        wall, _, (D, E) = timed(lambda a: tree_assemble(d, a), extra["response"])
         times["tree_assemble"] = wall * 1e3
         mean = jnp.maximum(jnp.mean(jnp.diagonal(D, axis1=1, axis2=2)), 1e-300)
         wall, _, factors = timed(tree_factor, D + jnp.eye(D.shape[1]) * tree["reg"] * mean, E)
         times["tree_factor"] = wall * 1e3
         times["tree_solve"] = timed(tree_solve, factors, tree_write(d, z["p"]))[0] * 1e3
-        times["tree_direction"] = timed(lambda a, b: tree_direction(d, a, b, ipm, tree), z, theta)[0] * 1e3
+        times["tree_direction"] = timed(lambda a, b: tree_direction(d, a, aux, b, ss, tree), z, theta)[0] * 1e3
     return times
 
 
 # ===== SKIPPING =====
-# Milestone M5 (plan section 9).
+# Milestone M5 (plan section 9). The zero test is exact: with stored multipliers it bounds the edge's
+# pricing value pi_e(f) from below (cone_bound), and pi_e(f) >= 0 means f lies in the dual cone of the
+# edge's cone, where the step is exactly zero. The multipliers are those of the edge's last solve; when
+# that solve ended at the apex they certify f with a positive margin as long as f is interior to the
+# dual cone, so the test keeps passing while prices drift by less than that margin. In the split mode
+# the step's set has no PSD block (Lam is in f instead), so its test uses no gamma: a PSD multiplier
+# would certify the smaller cone and could skip a step that is not zero.
+#
+# Compaction (plan 9.3): the edges the test leaves go to the IPM in the smallest bucket that holds them,
+# chosen on the device by lax.switch over buckets compiled ahead of time; padding slots repeat the first
+# edge in need and their results are dropped. With compaction none, every edge is solved and the zero edges are
+# overwritten, which is the plan's verification mode.
+
+EDGE_KEYS = ("R", "Rw", "Ry", "row_eq", "row_ge", "row_pad", "open", "lo", "hi", "n_ineq", "mat", "psd_mask", "adj", "adj_w", "tail_idx", "head_idx", "tail_coef", "head_coef")
+
+
+def edge_subset(d, idx):
+    """d with the edge step's per-edge arrays taken at the edges idx."""
+    return dict(d, **{k: d[k][idx] for k in EDGE_KEYS})
+
+
+def edge_response_of(d, h, v, ss):
+    return edge_response_sdp(d, h, v) if ss["psd"] == "edge" else edge_response(d, h, v)
+
+
+def edge_solve(d, h, f, ss, response):
+    """The IPM on every edge of d: the split mode's QP or the edge mode's SDP, with the multipliers the zero test and the certificate read (gamma is the PSD multiplier projected onto its cone, edge mode only), per-edge residuals, and with response the tree's K_e J_e K_e^T."""
+    if ss["psd"] == "edge":
+        x, u, Z, st = edge_sdp(d, h, f, ss["ipm_sdp"])
+        gamma = psd_eigh(Z)
+    else:
+        x, u, st = edge_qp(d, h, f, ss["ipm"])
+        gamma = None
+    g = edge_response_of(d, h, st["ipm_state"], ss) if response else None
+    return dict(x=x, u=u, gamma=gamma, response=g, metric=st["metric"], it=st["ipm_it"], state=st["ipm_state"])
+
+
+def solve_bucketed(d, h, f, need, aux, ss, response):
+    """Plan 9.3: the IPM on the smallest compiled bucket that holds every edge in need, scattered back. Edges outside need get x = 0, keep their stored multipliers and respond with zero."""
+    E = f.shape[0]
+    edge = ss["psd"] == "edge"
+    shape = (E, 2 * d["tail_idx"].shape[1], 2 * d["tail_idx"].shape[1])
+
+    def branch(B):
+        def run(h, f, need, u_old, gamma_old):
+            x = jnp.zeros_like(f)
+            g = jnp.zeros(shape) if response else None
+            if B == 0:
+                return dict(x=x, u=u_old, gamma=gamma_old, response=g, res=scalar(0.0), it=jnp.zeros((), jnp.int64))
+            idx = jnp.nonzero(need, size=B, fill_value=E)[0]
+            keep = jnp.where(idx < E, idx, idx[0])        # padding repeats an edge in need, so it never keeps the adaptive loop running longer
+            sol = edge_solve(edge_subset(d, keep), h[keep], f[keep], ss, response)
+            return dict(x=x.at[idx].set(sol["x"], mode="drop"), u=u_old.at[idx].set(sol["u"], mode="drop"),
+                        gamma=gamma_old.at[idx].set(sol["gamma"], mode="drop") if edge else gamma_old,
+                        response=g.at[idx].set(sol["response"], mode="drop") if response else None,
+                        res=jnp.max(jnp.where(idx < E, sol["metric"], 0.0)), it=jnp.asarray(sol["it"], jnp.int64))
+        return run
+
+    index = jnp.searchsorted(jnp.asarray(ss["buckets"]), jnp.sum(need))
+    return jax.lax.switch(index, [branch(B) for B in ss["buckets"]], h, f, need, aux["u"], aux["gamma"])
+
+
+def edge_step(d, h, f, size, aux, ss, response=False):
+    """Every edge's step (plan 8, 9): the zero test with the stored multipliers aux, then the IPM on the edges it leaves. Returns x, the multipliers to store (u, and gamma in the edge mode; the split mode returns aux's gamma unchanged), the largest IPM residual over solved edges, the iteration count, the number of edges solved, and with response the tree's edge blocks (zero for skipped edges, whose step stays zero under small price changes)."""
+    E = f.shape[0]
+    edge = ss["psd"] == "edge"
+    if ss["zero_test"]:
+        zero = cone_bound(d, f, size, aux["u"], aux["gamma"] if edge else jnp.zeros_like(aux["gamma"])) >= ss["lb_tol"]
+    else:
+        zero = jnp.zeros(E, bool)
+    need = ~zero
+    if ss["compaction"] == "bucketed":
+        out = solve_bucketed(d, h, f, need, aux, ss, response)
+    else:
+        sol = edge_solve(d, h, f, ss, response)
+        out = dict(x=pick(zero, jnp.zeros_like(sol["x"]), sol["x"]), u=pick(zero, aux["u"], sol["u"]),
+                   gamma=pick(zero, aux["gamma"], sol["gamma"]) if edge else aux["gamma"],
+                   response=pick(zero, jnp.zeros_like(sol["response"]), sol["response"]) if response else None,
+                   res=jnp.max(jnp.where(need, sol["metric"], 0.0)), it=jnp.asarray(sol["it"], jnp.int64))
+    return dict(out, solved=jnp.sum(need).astype(jnp.float64))
+
 
 # ===== TREES =====
 # Plan 11.1, 11.2, 11.6 and tex 4 (tree pass, safeguard): the exact tree, milestone M6. The compressed
@@ -1120,6 +1484,9 @@ def component_times(cfg, d, state):
 # the arrow matrix the IPM already factors, plus a Cholesky of the few rows after elimination, and as the
 # barrier goes to zero it tends to the frozen-face response of the tex: an active bound's weight grows
 # without limit, an inactive bound's goes to zero, and at a cone's apex every entry is pinned, so J_e -> 0.
+# In the edge mode (plan 8.4) the step's Newton matrix is dense, with the PSD block's HKM term in it, and
+# J_e comes from its Cholesky factor the same way (edge_response_sdp). Edges the zero test skipped
+# respond with zero: their step stays exactly zero under price changes smaller than the test's margin.
 #
 # Prices sit in a padded layout (L, w): the layer, then slot * q + coordinate. A missing vertex, a padding
 # layer or a row with no coefficients becomes an identity row with a zero right-hand side.
@@ -1164,6 +1531,24 @@ def edge_response(d, h, v):
     free = jnp.take_along_axis(d["wm"] / dw, cols, axis=1)
     g = ((cols[:, :, None] == cols[:, None, :]) * kc[:, :, None] * kc[:, None, :] * free[:, :, None]
          + z[:, :, None] * z[:, None, :] / sigma[:, None, None] - swap(x) @ x)
+    return jnp.where(jnp.all(jnp.isfinite(g), axis=(1, 2))[:, None, None], g, 0.0)
+
+
+def edge_response_sdp(d, h, v):
+    """edge_response for the edge mode (plan 8.4): the same J = H^-1 - H^-1 R^T S^-1 R H^-1, with H now the SDP step's dense Newton matrix at its final iterate, which edge_sdp factors anyway. Its PSD term tr(B_k X^-1 B_l Z) holds the frozen face's PSD part: it pins directions that leave the null space of X, as X^-1 grows there, and on the rest it keeps the curvature term that lets a low-rank moment matrix rotate, i.e. its state change. As the barrier goes to zero this tends to the derivative of the exact step where strict complementarity and nondegeneracy hold. Rows are scaled to a unit diagonal before the small shift, as in edge_response."""
+    R, gef = d["R"], d["row_ge"]
+    E, r, n = R.shape
+    H = sdp_newton(d, h, v, sdp_maps(d))[0]
+    factor = chol(H)
+    cols = jnp.concatenate([d["tail_idx"], d["head_idx"]], axis=1)
+    kc = jnp.concatenate([-d["tail_coef"], d["head_coef"]], axis=1)
+    pick_cols = jax.nn.one_hot(cols, n, dtype=jnp.float64) * kc[..., None]              # K_e restricted to its coupled coordinates (E, 2q, n)
+    a1, a2 = lower_solve(factor, swap(pick_cols)), lower_solve(factor, swap(R))          # L^-1 K_e^T, L^-1 R^T
+    s = swap(a2) @ a2 + jnp.eye(r) * (gef * v["sg"] / jnp.maximum(v["zg"] + (1.0 - gef), 1e-300) + d["row_pad"])[:, None, :]
+    unit = 1.0 / jnp.sqrt(jnp.maximum(jnp.diagonal(s, axis1=1, axis2=2), 1e-300))
+    rows = chol(unit[:, :, None] * s * unit[:, None, :] + jnp.eye(r) * 1e-12)
+    x = lower_solve(rows, unit[:, :, None] * (swap(a2) @ a1))
+    g = swap(a1) @ a1 - swap(x) @ x
     return jnp.where(jnp.all(jnp.isfinite(g), axis=(1, 2))[:, None, None], g, 0.0)
 
 
@@ -1254,12 +1639,12 @@ def tree_prices(d, D, E, p, m_plus, theta, tree):
     return jnp.where(jnp.all(jnp.isfinite(dp)), dp, 0.0)
 
 
-def tree_direction(d, z, theta, ipm, tree):
-    """The ordinary round T(z), its residual norm and bound, the tree's price change at z, capped at d_max times the residual (tex Algorithm 1), and the numbers logged per pass. An edge with flow whose response is exactly zero had a failed factorization."""
-    next_z, extra = pdhg_step(d, z, theta, ipm)
+def tree_direction(d, z, aux, theta, ss, tree):
+    """The ordinary round T(z), its residual norm and bound, the tree's price change at z, capped at d_max times the residual (tex Algorithm 1), and the numbers logged per pass. An edge with flow whose response is exactly zero had a failed factorization; an edge the zero test skipped responds with zero by design and carries no flow."""
+    next_z, extra = pdhg_step(d, z, aux, theta, ss, response=True)
     res = {k: z[k] - next_z[k] for k in z}
     r_norm = jnp.sqrt(jnp.maximum(p_inner(d, res, res, theta), 0.0))
-    g = edge_response(d, 1.0 / (d["T"] * theta), extra["ipm_state"])
+    g = extra["response"]
     D, E = tree_assemble(d, g)
     dp = tree_prices(d, D, E, z["p"], next_z["m"], theta, tree)
     direction = jax.tree_util.tree_map(jnp.zeros_like, z)
@@ -1267,13 +1652,14 @@ def tree_direction(d, z, theta, ipm, tree):
     shrink = jnp.minimum(1.0, tree["d_max"] * r_norm / jnp.maximum(d_norm, 1e-300))
     l0, ld = free_bound(d, next_z["p"], extra["u"], extra["gamma"])
     return dict(next=next_z, dp=shrink * dp, r_norm=r_norm, d_norm=shrink * d_norm, d_ratio=d_norm / jnp.maximum(r_norm, 1e-300), dp_max=jnp.max(jnp.abs(shrink * dp)),
-                response_failed=jnp.sum(jnp.all(g == 0.0, axis=(1, 2)) & (next_z["m"][:, 0] > 1e-9)), l0=l0, ld=ld, u=extra["u"], gamma=extra["gamma"], ipm_res=extra["ipm_res"], ipm_it=extra["ipm_it"])
+                response_failed=jnp.sum(jnp.all(g == 0.0, axis=(1, 2)) & (next_z["m"][:, 0] > 1e-9)), l0=l0, ld=ld, u=extra["u"], gamma=extra["gamma"], ipm_res=extra["ipm_res"], ipm_it=extra["ipm_it"],
+                solved=extra["solved"])
 
 
-def tree_trial(d, z, dp, tau, theta, ipm):
-    """A real round at w = z + tau d, with d changing the prices only (plan 11.1): T(w), the residual R(w), its norm squared and its product with d. These edge steps also give a valid bound at w's prices."""
+def tree_trial(d, z, aux, dp, tau, theta, ss):
+    """A real round at w = z + tau d, with d changing the prices only (plan 11.1): T(w), the residual R(w), its norm squared and its product with d. These edge steps also give a valid bound at w's prices. Skipping is exact, so the stored multipliers aux change which edges are solved and nothing else."""
     w = dict(z, p=z["p"] + tau * dp)
-    next_w, extra = pdhg_step(d, w, theta, ipm)
+    next_w, extra = pdhg_step(d, w, aux, theta, ss)
     res = {k: w[k] - next_w[k] for k in w}
     direction = dict(jax.tree_util.tree_map(jnp.zeros_like, z), p=dp)
     l0, ld = free_bound(d, w["p"], extra["u"], extra["gamma"])
@@ -1287,17 +1673,17 @@ def new_guard(r_safe):
 
 def tree_attempt(sg, d, pieces, state, guard):
     """One tree pass behind the SuperMann test (plan 11.6, tex Algorithm 1), with the blind step off. Both tests rest on T being the exact, firmly nonexpansive round, so a round whose IPM did not converge can support neither: a failed T(z) ends the pass, and a failed trial is rejected whatever its numbers say. Accepting w keeps T(w), which the trial already computed, as the next iterate: that is the accepted step followed by an ordinary round. A kept step starts a new average, because the old one averages points on another path. Returns (next state, rounds of edge work used)."""
-    z, theta = state["z"], state["theta"]
-    out = pieces["direction"](d, z, theta)
+    z, theta, aux = state["z"], state["theta"], aux_of(state)
+    out = pieces["direction"](d, z, aux, theta)
     r_norm, ipm_tol = float(out["r_norm"]), float(sg["ipm_tol"])
     guard["attempts"] += 1
-    guard["derivative_evals"] += int(d["c"].shape[0])
+    guard["derivative_evals"] += int(round(float(out["solved"])))     # skipped edges respond with zero and need none
     l0, ld = max(float(state["l0_best"]), float(out["l0"])), max(float(state["ld_best"]), float(out["ld"]))
     next_z, source, outcome, used, tau = out["next"], out, "fallback", 1, 1.0
     trials = []
     if float(out["ipm_res"]) <= ipm_tol and float(out["d_norm"]) > 0.0:
         for _ in range(int(sg["max_trials"])):
-            t = pieces["trial"](d, z, out["dp"], scalar(tau), theta)
+            t = pieces["trial"](d, z, aux, out["dp"], scalar(tau), theta)
             used += 1
             guard["trial_rounds"] += 1
             l0, ld = max(l0, float(t["l0"])), max(ld, float(t["ld"]))
@@ -1333,7 +1719,7 @@ def tree_attempt(sg, d, pieces, state, guard):
 
 
 # ===== SELFTEST =====
-# Milestones M3 and M6 (plan 17) on the tiny instance, against the J_rel that Clarabel saved in reference.json.
+# Milestones M3, M5 and M6 (plan 17) on the tiny instance, against the J_rel that Clarabel saved in reference.json.
 
 def run_checks(checks):
     ok_all, results = True, []
@@ -1358,8 +1744,8 @@ def random_primal(d, key):
     return m, 0.5 * (g + swap(g))
 
 
-def check_operators(d):
-    """The adjoints are true adjoints, and the step sizes give ||Sigma^(1/2) A T^(1/2)|| < 1 (plan 7.3), by power iteration on the whole operator (K m, B(m) - S)."""
+def check_operators(d, ss):
+    """The adjoints are true adjoints, and the step sizes give ||Sigma^(1/2) A T^(1/2)|| < 1 (plan 7.3), by power iteration on the whole operator: (K m, B(m) - S) in the split mode, K m in the edge mode."""
     key = jax.random.PRNGKey(5)
     k1, k2, k3 = jax.random.split(key, 3)
     m, lam = random_primal(d, k1)
@@ -1367,7 +1753,8 @@ def check_operators(d):
     err_k = abs(float(jnp.sum(k_forward(d, m) * p) - jnp.sum(m * k_adjoint(d, p))))
     err_b = abs(float(jnp.sum(psd_forward(d, m) * lam) - jnp.sum(m * psd_adjoint(d, lam))))
     keep = jnp.maximum(d["open"], d["e0"])
-    rt, rs, rp, rl = jnp.sqrt(d["T"]) * keep, jnp.sqrt(d["t_s"]), jnp.sqrt(d["sig_p"]), jnp.sqrt(d["sig_l"])
+    split = ss["psd"] == "split"
+    rt, rs, rp, rl = jnp.sqrt(d["T"]) * keep, jnp.sqrt(d["t_s"]), jnp.sqrt(d["sig_p"]), jnp.sqrt(d["sig_l"]) * split
 
     def forward(x, s):
         return rp * k_forward(d, rt * x), rl * (psd_forward(d, rt * x) - rs * s)
@@ -1376,6 +1763,7 @@ def check_operators(d):
         return rt * (k_adjoint(d, rp * a) + psd_adjoint(d, rl * b)), -rs * rl * b
 
     x, s = random_primal(d, k3)
+    s = s * split
     norm = 0.0
     for _ in range(300):
         a, b = forward(x, s)
@@ -1384,11 +1772,11 @@ def check_operators(d):
         x, s = x / size, s / size
         norm = math.sqrt(float(size))
     ok = err_k <= 1e-9 and err_b <= 1e-9 and norm < 1.0
-    return ok, f"K adjoint error {err_k:.1e}, B adjoint error {err_b:.1e}; step-scaled operator norm {norm:.4f} (must be below 1)"
+    return ok, f"K adjoint error {err_k:.1e}, B adjoint error {err_b:.1e}; step-scaled operator norm {norm:.4f} over {'(K, B - S)' if split else 'K'} (must be below 1)"
 
 
-def clarabel_edge_qp(d, e, h, f):
-    """One edge's QP through Clarabel, an independent solver: the same rows on the entries in use."""
+def clarabel_edge_qp(d, e, h, f, psd=False):
+    """One edge's step through Clarabel, an independent solver: the same rows on the entries in use, and with psd the moment matrix's PSD cone in push_model's triangle convention (the one the reference solve uses)."""
     import clarabel
     import scipy.sparse as sp
     keep = np.flatnonzero(np.maximum(np.asarray(d["open"][e]), np.asarray(d["e0"])))
@@ -1399,46 +1787,63 @@ def clarabel_edge_qp(d, e, h, f):
     for i in range(1, n):
         bounds[2 * (i - 1), i], bounds[2 * (i - 1), 0] = 1.0, -lo[i]
         bounds[2 * (i - 1) + 1, i], bounds[2 * (i - 1) + 1, 0] = -1.0, hi[i]
-    rows = np.vstack([R[eq], -R[ge], -bounds])
+    rows = sp.csc_matrix(np.vstack([R[eq], -R[ge], -bounds]))
     settings = clarabel.DefaultSettings()
     settings.verbose = False
     settings.max_threads = 1
     settings.tol_gap_abs = settings.tol_gap_rel = settings.tol_feas = 1e-10
     cones = ([clarabel.ZeroConeT(int(eq.sum()))] if eq.any() else []) + [clarabel.NonnegativeConeT(int(ge.sum()) + bounds.shape[0])]
-    sol = clarabel.DefaultSolver(sp.diags(np.asarray(h[e])[keep], format="csc"), np.asarray(f[e])[keep], sp.csc_matrix(rows), np.zeros(rows.shape[0]), cones, settings).solve()
+    if psd:
+        import push_model as pm
+        place = np.full(h.shape[1], -1)
+        place[keep] = np.arange(n)
+        size = int(round(float(np.trace(np.asarray(d["psd_mask"][e])))))
+        iu, ju = np.triu_indices(size)
+        cols = place[np.asarray(d["mat"][e])[iu, ju]]
+        if np.any(cols < 0):
+            raise ValueError(f"edge {e}: a moment matrix entry reads an entry of m that is not in use")
+        tri = sp.csc_matrix((-np.where(iu == ju, 1.0, math.sqrt(2.0)), (pm.svec_position(iu, ju, size, "clarabel"), cols)), shape=(size * (size + 1) // 2, n))
+        rows = sp.vstack([rows, tri], format="csc")         # s = -tri x = svec(B(x)) in the PSD cone
+        cones.append(clarabel.PSDTriangleConeT(size))
+    sol = clarabel.DefaultSolver(sp.diags(np.asarray(h[e])[keep], format="csc"), np.asarray(f[e])[keep], rows, np.zeros(rows.shape[0]), cones, settings).solve()
     out = np.zeros(h.shape[1])
     out[keep] = np.asarray(sol.x)
     return out
 
 
-def check_edge_qp(d, cfg, draws=3):
-    """The batched IPM against Clarabel on sampled edges, with random data that puts solutions on the boundary, and at the cone's apex, where a large positive flow price makes the exact step zero. It compares objectives and checks feasibility directly: a solver's gap tolerance of 1e-10 pins x only to about its square root, so x is held to the looser limit that this allows."""
+def check_edge_step(d, cfg, draws=3):
+    """The batched IPM of the configured mode (edge_qp, or edge_sdp in the edge mode) against Clarabel on sampled edges, with random data that puts solutions on the boundary, and at the cone's apex, where a large positive flow price makes the exact step zero. It compares objectives and checks feasibility directly, PSD included in the edge mode: a solver's gap tolerance of 1e-10 pins x only to about its square root, so x is held to the looser limit that this allows (3x looser for the SDP, whose curvature along the cone's boundary is weaker)."""
     st = cfg["selftest"]["m3"]
-    ipm = dict(cfg["solver"]["ipm"])
-    solve = jax.jit(lambda a, b: edge_qp(d, a, b, ipm))
+    ss = dict(solver_settings(cfg, d), zero_test=False, compaction="none")
+    edge = ss["psd"] == "edge"
+    solve = jax.jit(lambda a, b: edge_solve(d, a, b, ss, False))
     E = d["c"].shape[0]
     picks = np.linspace(0, E - 1, min(int(st["qp_edges"]), E)).astype(int)
-    worst_x, worst_obj, worst_feas, res, its = 0.0, 0.0, 0.0, 0.0, 0
+    worst_x, worst_obj, worst_feas, worst_psd, res, its = 0.0, 0.0, 0.0, 0.0, 0.0, 0
     for i in range(draws):
         k1, k2, k3 = jax.random.split(jax.random.PRNGKey(100 + i), 3)
         keep = jnp.maximum(d["open"], d["e0"])
         h = jnp.exp(jax.random.normal(k1, d["c"].shape)) * keep + (1.0 - keep)
         center = (0.5 * (d["lo"] + d["hi"]) * d["open"] + d["e0"]) * jax.random.uniform(k2, (E, 1), minval=0.0, maxval=2.0)
         f = (jax.random.normal(k3, d["c"].shape) - h * center) * keep
-        x, _, stats = solve(h, f)
-        res, its = max(res, float(stats["ipm_res"])), max(its, int(stats["ipm_it"]))
+        out = solve(h, f)
+        x = out["x"]
+        res, its = max(res, float(jnp.max(out["metric"]))), max(its, int(out["it"]))
         rows, y = mv(d["R"], x), x[:, :1]
         worst_feas = max(worst_feas, float(jnp.max(jnp.abs(rows) * d["row_eq"])), float(jnp.max(-rows * d["row_ge"])), float(jnp.max(d["open"] * (d["lo"] * y - x))), float(jnp.max(d["open"] * (x - d["hi"] * y))))
+        if edge:
+            worst_psd = max(worst_psd, float(candidate_stats(d, dict(m=x))["psd"]))
         for e in picks:
-            xe, other, he, fe = np.asarray(x[e]), clarabel_edge_qp(d, int(e), h, f), np.asarray(h[e]), np.asarray(f[e])
+            xe, other, he, fe = np.asarray(x[e]), clarabel_edge_qp(d, int(e), h, f, psd=edge), np.asarray(h[e]), np.asarray(f[e])
             value = lambda a: 0.5 * np.sum(he * a * a) + fe @ a
             worst_obj = max(worst_obj, abs(value(xe) - value(other)) / (1.0 + abs(value(other))))
             worst_x = max(worst_x, float(np.max(np.abs(xe - other))))
-    x, _, stats = solve(jnp.ones_like(d["c"]), 10.0 * d["e0"] * jnp.ones_like(d["c"]))
-    apex = float(jnp.max(jnp.abs(x)))
-    ok = worst_obj <= 1e-8 and worst_feas <= 1e-9 and worst_x <= 1e-4 and res <= 1e-8 and apex <= 1e-8
-    return ok, (f"{picks.size} edges x {draws} draws: largest objective difference from Clarabel {worst_obj:.1e}, x difference {worst_x:.1e}, row or box violation {worst_feas:.1e}; "
-                f"worst IPM residual {res:.1e}, most iterations {its}; apex step size {apex:.1e} in {int(stats['ipm_it'])} iterations")
+    out = solve(jnp.ones_like(d["c"]), 10.0 * d["e0"] * jnp.ones_like(d["c"]))
+    apex = float(jnp.max(jnp.abs(out["x"])))
+    limit_x = 3e-4 if edge else 1e-4
+    ok = worst_obj <= 1e-8 and worst_feas <= 1e-9 and worst_psd <= 1e-9 and worst_x <= limit_x and res <= 1e-8 and apex <= 1e-8
+    return ok, (f"{'edge SDP' if edge else 'edge QP'}, {picks.size} edges x {draws} draws: largest objective difference from Clarabel {worst_obj:.1e}, x difference {worst_x:.1e}, row or box violation {worst_feas:.1e}"
+                + (f", PSD violation {worst_psd:.1e}" if edge else "") + f"; worst IPM residual {res:.1e}, most iterations {its}; apex step size {apex:.1e} in {int(out['it'])} iterations")
 
 
 def check_bound_allowance():
@@ -1543,10 +1948,11 @@ def selftest(sets):
         return fired >= 1 and last < first, f"{fired} restarts; KKT error at the start {first:.2e}, at the last restart {last:.2e}"
 
     ok, checked = run_checks([
-        ("M3 operators: adjoints and step sizes", lambda: check_operators(d)),
-        ("M3 edge QP against Clarabel", lambda: check_edge_qp(d, cfg)),
+        ("M3 operators: adjoints and step sizes", lambda: check_operators(d, solver_settings(cfg, d))),
+        ("M3 edge step against Clarabel", lambda: check_edge_step(d, cfg)),
         ("M3 arrays hold the hand push, and the free bound stays valid", lambda: check_hand_push(cfg, d, info, ref)),
         ("M3 the bound's allowance covers terms that cancel", check_bound_allowance),
+        ("M5 skipping changes no iterate, and the zero test never skips a nonzero step", lambda: check_skipping(cfg, d)),
         ("M3 run D reaches a stop on the tiny instance", solve_tiny),
         ("M3 the stop is close to J_rel", check_close),
         ("M3 every logged bound stays below J_rel", check_bound_below),
@@ -1571,14 +1977,68 @@ def stop_is_close(solved, J_rel, tol, close):
 
 def short_run(cfg, d, theta=0.3, rounds=200):
     """A mid-run state from plain rounds, for the checks that need realistic faces and flows."""
-    ipm = dict(cfg["solver"]["ipm"])
+    ss = solver_settings(cfg, d)
     th = scalar(theta)
-    step = jax.jit(lambda z: pdhg_step(d, z, th, ipm)[0])
-    z = initial_state(d, theta)["z"]
+    step = jax.jit(lambda z, aux: pdhg_step(d, z, aux, th, ss))
+    state = initial_state(d, theta, ss)
+    z, aux = state["z"], aux_of(state)
     for _ in range(rounds):
-        z = step(z)
+        z, extra = step(z, aux)
+        aux = dict(u=extra["u"], gamma=extra["gamma"])
     jax.block_until_ready(z["m"])
     return z, th
+
+
+def tight_settings(cfg, d):
+    """Solver settings for checks that need the edge steps solved hard: no skipping, and tighter IPMs."""
+    ss = solver_settings(cfg, d)
+    return dict(ss, zero_test=False, compaction="none", ipm=dict(ss["ipm"], tol=1e-13, iters=60, min_iters=0),
+                ipm_sdp=dict(ss["ipm_sdp"], tol=1e-11, iters=80, min_iters=0))
+
+
+def check_skipping(cfg, d, theta=0.3, rounds=300, every=50, clarabel_edges=8):
+    """Milestone M5 (plan 9.1, 9.3).
+
+    Compaction: with the zero test on, bucketed compaction gives the same iterates as the verification mode, which solves every edge and overwrites the settled ones, to 1e-8 at every 50th round; only batched rounding may differ.
+
+    Zero test: at the end, every edge it settles has a zero step. An IPM cannot show that by |x|: at the apex its iterate sits about n mu / pi from zero (pi the edge's pricing margin), so with tol 1e-10 and a small margin a zero step comes back as 1e-7 or more. The step's optimal value can: it is exactly 0 at a zero step and -1/2 x*^T H x* < 0 otherwise, so on the settled edges neither the tight IPM nor Clarabel may find a value below -1e-9 (1 + |f|) (-1e-8 for Clarabel, whose gap tolerance is 1e-10). For the same reason, comparing iterates with a run that has no zero test would measure the IPM's error at the apex, not the skip."""
+    base = solver_settings(cfg, d)
+    edge = base["psd"] == "edge"
+    variants = dict(on=dict(base, zero_test=True, compaction="bucketed"), verify=dict(base, zero_test=True, compaction="none"))
+    th = scalar(theta)
+    E = int(d["c"].shape[0])
+    kept, last, skipped = {}, {}, 0.0
+    for name, ss in variants.items():
+        step = jax.jit(lambda z, aux, ss=ss: pdhg_step(d, z, aux, th, ss))
+        state = initial_state(d, theta, ss)
+        z, aux = state["z"], aux_of(state)
+        kept[name] = []
+        for k in range(rounds):
+            z, extra = step(z, aux)
+            aux = dict(u=extra["u"], gamma=extra["gamma"])
+            if name == "on":
+                skipped += E - float(extra["solved"])
+            if (k + 1) % every == 0:
+                kept[name].append(jax.device_get(z))
+        last[name] = (z, aux)
+    worst = max(float(np.max(np.abs(a[key] - b[key]))) for a, b in zip(kept["on"], kept["verify"]) for key in a)
+    z, aux = last["on"]
+    h, f, size = step_data(d, z, th)
+    zero = cone_bound(d, f, size, aux["u"], aux["gamma"] if edge else jnp.zeros_like(aux["gamma"])) >= base["lb_tol"]
+    x = jax.jit(lambda a, b: edge_solve(d, a, b, tight_settings(cfg, d), False)["x"])(h, f)
+    scale = 1.0 + jnp.max(jnp.abs(f), axis=1)
+    value = (0.5 * jnp.sum(h * x * x, axis=1) + jnp.sum(f * x, axis=1)) / scale
+    lowest = float(jnp.min(jnp.where(zero, value, jnp.inf)))
+    settled = np.flatnonzero(np.asarray(zero))
+    lowest_c = np.inf
+    hn, fn, sn = np.asarray(h), np.asarray(f), np.asarray(scale)
+    for e in settled[np.unique(np.linspace(0, settled.size - 1, min(clarabel_edges, settled.size)).astype(int))] if settled.size else []:
+        xc = clarabel_edge_qp(d, int(e), h, f, psd=edge)
+        lowest_c = min(lowest_c, float((0.5 * np.sum(hn[e] * xc * xc) + fn[e] @ xc) / sn[e]))
+    ok = worst <= 1e-8 and lowest >= -1e-9 and lowest_c >= -1e-8
+    return ok, (f"{rounds} rounds, {skipped / (rounds * E):.0%} of edge steps skipped: largest iterate difference between bucketed compaction and the verification mode {worst:.1e}; "
+                f"at the end the test settles {settled.size} of {E} edges, whose steps have optimal value at least {lowest:.1e} (tight IPM) and {lowest_c:.1e} (Clarabel, {min(clarabel_edges, settled.size)} edges), "
+                f"relative to 1 + |f|: zero up to solver accuracy")
 
 
 def dense_blocks(D, E):
@@ -1608,11 +2068,11 @@ def check_cyclic_reduction(d, cfg, z, theta):
         x = np.asarray(tree_solve(tree_factor(D, E), rho)).ravel()
         exact = np.linalg.solve(dense_blocks(D, E), np.asarray(rho).ravel())
         worst = max(worst, float(np.linalg.norm(x - exact) / np.linalg.norm(exact)))
-    ipm = dict(cfg["solver"]["ipm"])
+    ss = solver_settings(cfg, d)
+    aux = aux_of(initial_state(d, float(theta), ss))
 
     def own_blocks(y, th):
-        extra = pdhg_step(d, y, th, ipm)[1]
-        return tree_assemble(d, edge_response(d, 1.0 / (d["T"] * th), extra["ipm_state"]))
+        return tree_assemble(d, pdhg_step(d, y, aux, th, ss, response=True)[1]["response"])
 
     D, E = jax.jit(own_blocks)(z, theta)
     mean = jnp.sum(jnp.diagonal(D, axis1=1, axis2=2) * d["tree_mask"]) / jnp.sum(d["tree_mask"])
@@ -1626,22 +2086,28 @@ def check_cyclic_reduction(d, cfg, z, theta):
 
 
 def check_edge_response(d, cfg, z, theta):
-    """The edge response against finite differences of the real edge step (plan 17): on edges with flow whose active set does not change, K_e (m+(p + dp) - m+(p)) = -K_e J_e K_e^T dp. An IPM pins a narrow coordinate only to about the square root of its tolerance, which is noise for a finite difference, so this runs the IPM tighter and reads the median and the 90th percentile."""
-    ipm = dict(cfg["solver"]["ipm"], tol=1e-13, iters=60)
+    """The edge response against finite differences of the real edge step (plan 17): on edges with flow whose active set does not change, K_e (m+(p + dp) - m+(p)) = -K_e J_e K_e^T dp. In the edge mode the face includes the moment matrix's rank. An IPM pins a narrow coordinate only to about the square root of its tolerance, which is noise for a finite difference, so this runs the IPM tighter and reads the median and the 90th percentile."""
+    ss = tight_settings(cfg, d)
     t = d["T"] * theta
-    h, base = 1.0 / t, d["c"] + psd_adjoint(d, z["Lam"]) - z["m"] / t
-    solve = jax.jit(lambda p: edge_qp(d, h, base + k_adjoint(d, p), ipm))
+    h, base = 1.0 / t, d["c"] - z["m"] / t + (psd_adjoint(d, z["Lam"]) if "Lam" in z else 0.0)
+    solve = jax.jit(lambda p: edge_solve(d, h, base + k_adjoint(d, p), ss, False))
     dp = 1e-4 * jax.random.normal(jax.random.PRNGKey(7), d["b"].shape) * (d["sig_p"] > 0.0)
-    x0, _, s0 = solve(z["p"])
-    x1, _, s1 = solve(z["p"] + dp)
-    v0, v1 = s0["ipm_state"], s1["ipm_state"]
-    g = jax.jit(lambda v: edge_response(d, h, v))(v0)
+    s0, s1 = solve(z["p"]), solve(z["p"] + dp)
+    x0, x1, v0, v1 = s0["x"], s1["x"], s0["state"], s1["state"]
+    g = jax.jit(lambda v: edge_response_of(d, h, v, ss))(v0)
     cols = jnp.concatenate([d["tail_idx"], d["head_idx"]], axis=1)
     kc = jnp.concatenate([-d["tail_coef"], d["head_coef"]], axis=1)
     rows = dp.ravel()[jnp.concatenate([d["tail_rows"], d["head_rows"]], axis=1)]
     actual = np.asarray(kc * jnp.take_along_axis(x1 - x0, cols, axis=1))
     predicted = np.asarray(-jnp.einsum("eab,eb->ea", g, rows))
-    faces = lambda v: jnp.concatenate([v["zl"] > v["sl"], v["zu"] > v["su"], v["zg"] > v["sg"]], axis=1)
+
+    def faces(v):
+        out = [v["zl"] > v["sl"], v["zu"] > v["su"], v["zg"] > v["sg"]]
+        if "X" in v:                                       # the moment matrix's rank: eigenvalues of X well above its smallest scale
+            w = jnp.linalg.eigvalsh(v["X"])
+            out.append(w > 1e-6 * (1.0 + w[:, -1:]))
+        return jnp.concatenate(out, axis=1)
+
     use = np.asarray(jnp.all(faces(v0) == faces(v1), axis=1) & (x0[:, 0] > 1e-4))
     if not use.any():
         return False, "no edge with flow kept its active set, so nothing was compared"
@@ -1652,11 +2118,12 @@ def check_edge_response(d, cfg, z, theta):
 
 def check_zero_direction(d, cfg, z, theta):
     """A zero residual gives exactly zero correction (plan 11.1): b is moved so that the current edge step conserves every row, with delta = 0, which makes z's prices a fixed point of the dual step."""
-    ipm, tree = dict(cfg["solver"]["ipm"]), tree_settings(cfg)
+    ss, tree = solver_settings(cfg, d), tree_settings(cfg)
+    aux = aux_of(initial_state(d, float(theta), ss))
 
     def at_rest(y, th):
-        next_y, extra = pdhg_step(d, y, th, ipm)
-        D, E = tree_assemble(d, edge_response(d, 1.0 / (d["T"] * th), extra["ipm_state"]))
+        next_y, extra = pdhg_step(d, y, aux, th, ss, response=True)
+        D, E = tree_assemble(d, extra["response"])
         return tree_prices(dict(d, b=k_forward(d, next_y["m"]), delta=jnp.zeros_like(d["delta"])), D, E, y["p"], next_y["m"], th, tree)
 
     largest = float(jnp.max(jnp.abs(jax.jit(at_rest)(z, theta))))
@@ -1665,26 +2132,29 @@ def check_zero_direction(d, cfg, z, theta):
 
 def check_fallback(cfg, d, pieces, z, theta):
     """A fallback is the plain PDHG step (plan 11.6): with no trials allowed, a tree pass must return T(z). Compiled separately the two may differ in rounding, so this reports the difference and allows only rounding."""
-    ipm = dict(cfg["solver"]["ipm"])
-    state = dict(initial_state(d, float(theta)), z=z)
+    ss = solver_settings(cfg, d)
+    state = dict(initial_state(d, float(theta), ss), z=z)
     guard = new_guard(np.inf)
     new, used = tree_attempt(dict(cfg["tree"]["safeguard"], max_trials=0), d, pieces, state, guard)
-    plain = jax.jit(lambda y, th: pdhg_step(d, y, th, ipm)[0])(z, theta)
+    plain = jax.jit(lambda y, a, th: pdhg_step(d, y, a, th, ss)[0])(z, aux_of(state), theta)
     worst = max(float(jnp.max(jnp.abs(new["z"][k] - plain[k]))) for k in plain)
     return worst <= 1e-9 and guard["fallback"] == 1 and used == 1, f"largest difference from the plain step {worst:.1e}, {guard['fallback']} fallback, {used} round of edge work"
 
 
 def check_firm_nonexpansive(d, cfg, z, theta):
     """What the safeguard's kept steps rest on (plan 11.6, tex Lemma halfspace): for any states a, b, <R(a) - R(b), a - b>_P >= ||R(a) - R(b)||_P^2. With b a fixed point this is the plan's Fejer property, and it needs no saved solution. A wrong sign in the metric would break it by a large margin."""
-    ipm = dict(cfg["solver"]["ipm"], tol=1e-13, iters=60)
-    step = jax.jit(lambda y: pdhg_step(d, y, theta, ipm)[0])
+    ss = tight_settings(cfg, d)
+    aux = aux_of(initial_state(d, float(theta), ss))
+    step = jax.jit(lambda y: pdhg_step(d, y, aux, theta, ss)[0])
     keep = jnp.maximum(d["open"], d["e0"])
 
     def shifted(key, size):
         k1, k2, k3, k4 = jax.random.split(key, 4)
-        lam, s = jax.random.normal(k1, d["sig_l"].shape) * d["psd_mask"], jax.random.normal(k2, d["sig_l"].shape) * d["psd_mask"]
-        return dict(m=z["m"] + size * jax.random.normal(k3, d["c"].shape) * keep, S=z["S"] + size * 0.5 * (s + swap(s)), Lam=z["Lam"] + size * 0.5 * (lam + swap(lam)),
-                    p=z["p"] + size * jax.random.normal(k4, d["b"].shape) * (d["sig_p"] > 0.0))
+        out = dict(m=z["m"] + size * jax.random.normal(k3, d["c"].shape) * keep, p=z["p"] + size * jax.random.normal(k4, d["b"].shape) * (d["sig_p"] > 0.0))
+        if "S" in z:
+            lam, s = jax.random.normal(k1, d["sig_l"].shape) * d["psd_mask"], jax.random.normal(k2, d["sig_l"].shape) * d["psd_mask"]
+            out.update(S=z["S"] + size * 0.5 * (s + swap(s)), Lam=z["Lam"] + size * 0.5 * (lam + swap(lam)))
+        return out
 
     tightest = np.inf
     for i in range(6):
@@ -1705,25 +2175,29 @@ def check_failed_trial(cfg, d, pieces, z, theta):
     sg = dict(cfg["tree"]["safeguard"], ipm_tol=1e-2)
     stub = dict(pieces, trial=lambda *args: dict(pieces["trial"](*args), ipm_res=scalar(1.0)))
     guard = new_guard(np.inf)
-    tree_attempt(sg, d, stub, dict(initial_state(d, float(theta)), z=z), guard)
+    tree_attempt(sg, d, stub, dict(initial_state(d, float(theta), solver_settings(cfg, d)), z=z), guard)
     tries = int(sg["max_trials"])
     return guard["rejected_ipm"] == tries and guard["fallback"] == 1 and guard["accepted_k1"] + guard["accepted_k2"] == 0, f"{guard['rejected_ipm']} of {tries} tries rejected, {guard['accepted_k1'] + guard['accepted_k2']} kept, {guard['fallback']} fallback"
 
 
 def check_frozen_face(d, cfg):
-    """One tree step on a linear problem (plan 17): boxes wide enough never to be active and no rows keep every edge on one face, so the edge step is exactly affine in the prices, and b is set so that a known small price vector solves every row. The Newton step must then cut the row residual by at least 100 x. This runs the whole path: edge response, assembly, cyclic reduction, right-hand side and a real trial. It uses a tiny tree.reg, since it tests the solve and not how cautious the default step is."""
-    ipm, tree = dict(cfg["solver"]["ipm"], iters=80), dict(tree_settings(cfg), reg=1e-8, d_max=1e9)
+    """One tree step on a linear problem (plan 17): boxes wide enough never to be active and no rows keep every edge on one face, so the edge step is exactly affine in the prices, and b is set so that a known small price vector solves every row. The Newton step must then cut the row residual by at least 100 x. This runs the whole path: edge response, assembly, cyclic reduction, right-hand side and a real trial. In the edge mode the PSD block is switched off here (an empty moment matrix), since a PSD constraint is never affine; check_edge_response covers its response. It uses a tiny tree.reg, since it tests the solve and not how cautious the default step is."""
+    base, tree = solver_settings(cfg, d), dict(tree_settings(cfg), reg=1e-8, d_max=1e9)
+    ss = dict(base, ipm=dict(base["ipm"], iters=80), ipm_sdp=dict(base["ipm_sdp"], iters=80))
     no_rows = jnp.zeros_like(d["R"])
     wide = dict(d, lo=-100.0 * d["open"], hi=100.0 * d["open"], R=no_rows, Rw=no_rows, Ry=no_rows[:, :, 0], row_eq=jnp.zeros_like(d["row_eq"]), row_ge=jnp.zeros_like(d["row_ge"]),
                 row_pad=jnp.ones_like(d["row_pad"]), n_ineq=2.0 * jnp.sum(d["open"], axis=1), delta=jnp.zeros_like(d["delta"]))
+    if ss["psd"] == "edge":
+        wide["psd_mask"] = jnp.zeros_like(d["psd_mask"])
     theta = scalar(1.0)
-    start = initial_state(d, 1.0)["z"]
-    start = dict(start, m=d["e0"] * jnp.ones_like(d["c"]))
+    state = initial_state(d, 1.0, ss)
+    aux = aux_of(state)
+    start = dict(state["z"], m=d["e0"] * jnp.ones_like(d["c"]))
     known = 1e-2 * jax.random.normal(jax.random.PRNGKey(9), d["b"].shape) * (d["sig_p"] > 0.0)
-    target = jax.jit(lambda: pdhg_step(wide, dict(start, p=known), theta, ipm)[0]["m"])()
+    target = jax.jit(lambda: pdhg_step(wide, dict(start, p=known), aux, theta, ss)[0]["m"])()
     linear = dict(wide, b=k_forward(wide, target))
-    out = jax.jit(lambda y, th: tree_direction(linear, y, th, ipm, tree))(start, theta)
-    after = jax.jit(lambda y, dp, th: tree_trial(linear, y, dp, scalar(1.0), th, ipm)["next"]["m"])(start, out["dp"], theta)
+    out = jax.jit(lambda y, th: tree_direction(linear, y, aux, th, ss, tree))(start, theta)
+    after = jax.jit(lambda y, dp, th: tree_trial(linear, y, aux, dp, scalar(1.0), th, ss)["next"]["m"])(start, out["dp"], theta)
     size = lambda m: float(jnp.max(jnp.abs(k_forward(linear, m) - linear["b"])))
     before, left = size(out["next"]["m"]), size(after)
     return before >= 100.0 * left, f"largest row residual {before:.2e} before the step, {left:.2e} after: {before / max(left, 1e-300):.0f} x"
@@ -1801,7 +2275,8 @@ def solve_run(cfg, run, task, sets):
     enable_compile_cache(cfg)
     prob = ensure_problem(cfg, run, task, sets)
     d, info = build_data(prob, cfg)
-    print(f"{cfg['run_name']} on {cfg['task']}: {info['E']} edges, {info['V']} vertices, {info['types']} edge types; m {info['n']}, rows {info['r']}, moment matrix {info['s']}, q {info['q']}; tree {cfg['tree']['type']}, width {info['tree_width']} over {info['tree_layers']} layers", flush=True)
+    print(f"{cfg['run_name']} on {cfg['task']}: {info['E']} edges, {info['V']} vertices, {info['types']} edge types; m {info['n']}, rows {info['r']}, moment matrix {info['s']}, q {info['q']}; "
+          f"PSD {info['psd']}; tree {cfg['tree']['type']}, width {info['tree_width']} over {info['tree_layers']} layers", flush=True)
     pieces, compile_s = compile_solver(cfg, d)
     print(f"compiled in {compile_s:.1f} s", flush=True)
     theta = choose_theta(cfg, d, pieces, cfg["run_name"])
@@ -1816,7 +2291,7 @@ def solve_run(cfg, run, task, sets):
     (out / "timing.json").write_text(json.dumps(dict(env=environment_info(), compile_s=compile_s, seconds=result["seconds"], rounds=result["rounds"], ms_per_round=result["ms_per_round"], component_ms=times), indent=2))
     z = jax.device_get(state["z"])
     lb = jax.device_get(jax.jit(lambda p, u, gamma: edge_bounds(d, p, u, gamma)[0])(state["z"]["p"], state["u"], state["gamma"]))
-    np.savez(out / "final_state.npz", m=z["m"], S=z["S"], Lam=z["Lam"], p=z["p"], alive=info["alive"], lb=lb)
+    np.savez(out / "final_state.npz", **z, alive=info["alive"], lb=lb)      # m and p, plus S and Lam in the split mode
     print(json.dumps(result, indent=2))
     print(f"saved {out}", flush=True)
     return result
@@ -1827,7 +2302,7 @@ def main():
     ap.add_argument("--run", default=None, help="run config: a name in configs/runs/ or a path")
     ap.add_argument("--task", default=None, help="task name, overriding the config")
     ap.add_argument("--set", action="append", default=[], help="override one key, e.g. --set trellis.N=16")
-    ap.add_argument("--selftest", action="store_true", help="milestones M3 and M6 on the tiny instance")
+    ap.add_argument("--selftest", action="store_true", help="milestones M3, M5 and M6 on the tiny instance")
     ap.add_argument("--selftest_m6", action="store_true", help="milestone M6 alone")
     ap.add_argument("--bench_chol", action="store_true", help="Cholesky at the edge QP's real sizes: library vs hand-written")
     ap.add_argument("--bench_psd", action="store_true", help="PSD projection per round, orders 1-3 (M0)")

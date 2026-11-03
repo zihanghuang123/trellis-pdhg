@@ -1,0 +1,5 @@
+# Run D (plain PDHG) with the PSD constraint split out of the edge steps, the coupling before plan 8.4.
+# Every other setting is the current one, so D vs D_split isolates the coupling.
+run_name: D_split
+tree: {type: none}
+solver: {psd_coupling: split}

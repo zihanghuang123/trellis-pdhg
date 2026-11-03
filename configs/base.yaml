@@ -58,7 +58,12 @@ solver:
   stall_rounds: 2000             # safety stop: no L_best / U_flow progress > 1e-6 rel
   rounds_per_scan: 50
   theta_pd: auto                 # per-config tuning (7.3): runs/tuned/<config>_<task>.yaml
-  theta_psd: same                # same | <float>
+  # Where the moment matrix's PSD constraint lives (8.4). edge: inside each edge step, solved by a batched
+  # SDP interior-point method, so the outer PDHG couples edges through K alone and the tree models all of it.
+  # split: copies S with duals Lam in the PDHG (the earlier form; on the tiny instance the PSD coupling held
+  # most of the fixed-point residual, which the tree's vertex prices cannot reach).
+  psd_coupling: edge
+  theta_psd: same                # only `same` runs: a separate PSD balance is not wired (tested at 0.1-10 on the tiny instance: 1 was best)
   primal_weight_update: none     # none | pdlp
   tune: {grid: [0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0], rounds: 2000, score: kkt}
   delta: 1.0e-4                  # state tolerance of P_delta
@@ -69,6 +74,7 @@ solver:
     eps_flow: 1.0e-3
     eps_psd: 1.0e-3
     eps_row: 1.0e-3
+    below_rel: 0.01              # a passing candidate more than this fraction below L is infeasible beyond the tolerances: it never stops the solve
     plateau: {gain: 0.01, window: 0.2, min_rounds: 500}
     strict: {flow: 1.0e-6, psd: 1.0e-8, row: 1.0e-8}
   compile: {aot: true, cache_dir: ~/.cache/trellis_jax, fail_on_late_compile: true}
@@ -76,20 +82,27 @@ solver:
   qp_block: auto                 # exact_ipm for kappa=1, split_rows for kappa>=2
   psd_proj: auto                 # auto | eigh | lowrank | polar_ns: eigh at kappa 1, lowrank (polar_ns fallback) above (8.2). Only auto and eigh are wired so far: anything else stops with an error
   psd_lowrank: {p: 8, tol: 1.0e-6, exact_check_every: 50}   # basis size, residual that sends a matrix to the fallback, rounds between exact-error logs (kappa 1)
-  # Edge QP (8.1). iters caps the iterations. adaptive stops once every edge has converged, at the
-  # cost of reading one flag per iteration. cholesky: library | small (hand-written, for small sizes).
-  ipm: {iters: 40, tol: 1.0e-11, adaptive: true, cholesky: library}
+  # Edge QP (8.1, the split mode). iters caps the iterations. adaptive stops once every edge has converged,
+  # at the cost of reading one flag per iteration (a host sync on a GPU); the first min_iters run without it.
+  # cholesky: library | small (hand-written, for small sizes).
+  ipm: {iters: 40, min_iters: 10, tol: 1.0e-11, adaptive: true, cholesky: library}
+  # Edge SDP (8.4, the edge mode): the same rules. An SDP's Newton systems grow ill-conditioned sooner, so the
+  # tolerance is 1e-10, still 100x inside the tree safeguard's ipm_tol.
+  ipm_sdp: {iters: 60, min_iters: 15, tol: 1.0e-10, adaptive: true}
   log_every_s: 10                # progress line at most this often; every scan block goes to log.jsonl
   restarts: {scheme: pdlp_kkt, beta_sufficient: 0.2, beta_necessary: 0.8, beta_artificial: 0.36}
   checkpoint_every: 2000
 
-# Not built until M5, which turns on zero_test, gershgorin_skip and compaction: bucketed. Until then a run that asks for any of these stops with an error.
+# Exact skipping (9, M5). The zero test and compaction are built; the face cache and the Gershgorin skip are not,
+# and a run that asks for them stops with an error (the face cache is exact only for polyhedral steps, so it
+# cannot serve the edge mode's SDP step; the Gershgorin skip only saves split-mode eigh calls).
 skipping:
-  zero_test: false
+  zero_test: true
   lb_tol: 1.0e-12
   face_cache: false              # true for B
   gershgorin_skip: false
-  compaction: none               # none | bucketed  (15.5: measure both)
+  compaction: bucketed           # none | bucketed  (15.5: measure both). none solves every edge and overwrites the zero ones: the verification mode
+  buckets: [64, 128, 256, 512, 1024, 2048]   # IPM batch sizes compiled ahead of time; 0 and the edge count are always added
 
 tree:
   type: exact                    # none | exact | lowrank_a | lowrank_b
@@ -121,7 +134,7 @@ tree:
     hpe: {sigma: 0.9, lambda_min: 0.1}
 
 certificate:
-  free_every: 1                  # rounds
+  free_every: 10                 # rounds; must divide a scan block (rounds_per_scan, or tree.every with a tree). L is a running max, so fewer evaluations lose little
   exact_every: 200
   full_exact_every: 1000
   lazy: true

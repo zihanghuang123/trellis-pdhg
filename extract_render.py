@@ -106,9 +106,12 @@ def heaviest_path(prob, y):
     for k in range(prob["N"]):
         idx = alive[layers[alive] == k]
         value = np.minimum(best[tails[idx]], flow[idx])
-        order = np.argsort(value, kind="stable")        # ascending, so the last write to a head is its largest
-        best[heads[idx[order]]] = value[order]
-        came[heads[idx[order]]] = idx[order]
+        order = np.lexsort((value, heads[idx]))         # by head, then ascending value: the last of each head's run is its largest
+        h = heads[idx[order]]
+        last = np.ones(h.size, bool)                    # one write per head (numpy leaves repeated-index assignment order unspecified)
+        last[:-1] = h[1:] != h[:-1]
+        best[h[last]] = value[order][last]
+        came[h[last]] = idx[order][last]
     if came[prob["t"]] < 0:
         raise RuntimeError("no alive path reaches the goal")
     path, v = [], prob["t"]

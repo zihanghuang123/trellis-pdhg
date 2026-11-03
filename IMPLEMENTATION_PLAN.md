@@ -450,6 +450,15 @@ M1 prints the resulting sizes per group of edge types. They set the size of the 
 - Accept an inexact projection only after checking the projection error, $\|X_+ X_-\|_F$ and $\lambda_{\min}(X_+)$, against `psd_proj_tol`. The PDHG then runs inexactly to tolerance (Rasch & Chambolle); log the errors. The certificate stays valid either way: it holds for any duals (§10.1).
 - The optional frozen-rank Jacobian needs eigenvectors: `eigh` at κ = 1; above κ = 1 the low-rank tracker's Ritz vectors give the eigenvectors of the positive part, which is the face that Jacobian freezes.
 
+### 8.4 PSD inside the edge step (`solver.psd_coupling: edge`, the default; deviation, §19)
+- **Why.** With the PSD blocks split out as copies $S$ with duals $\Lambda$ (§7.1, kept as `psd_coupling: split`), the first exact-tree runs on the tiny instance gained nothing: every tree attempt fell back to the K2 step, and about 60 % of the fixed-point residual sat in the $\Lambda$ block, with the PSD coupling $\|\mathcal B(m) - S\|$ the largest primal error. The tree moves vertex prices only, so it cannot reach that block. Moving the PSD constraint into each edge's set leaves $K$ as the whole outer operator, which is exactly what the tree models.
+- **The step.** $m_e^+ = \arg\min_{m \in P_e,\ \mathcal B_e(m) \succeq 0} \langle c_e + K_e^\top p,\, m\rangle + \tfrac12\|m - m_e\|^2_{T_e^{-1}}$: a small SDP per edge. The PDHG state is $(m, p)$, the step sizes come from $K$ alone (§7.3), and the metric $P$ of §11.6 has no $S$ or $\Lambda$ block.
+- **Solver.** A batched Mehrotra predictor–corrector with the HKM direction, in §8.1's sign conventions (`edge_sdp`). The PSD block adds $M_{kl} = \mathrm{tr}(B_k X^{-1} B_l Z)$ to the Newton matrix, which is dense, so the matrix is factored whole ($n \times n$, at most 91 at κ = 1) and the rows go through §8.1's row form. A smaller edge type's padding is an identity block in both $X$ and $Z$ that never moves. Settings `solver.ipm_sdp` (tolerance 1e-10, still 100× inside the safeguard's `ipm_tol`).
+- **Certificate.** $\Gamma$ (§10.1) is the step's own PSD multiplier $Z$, projected onto the PSD cone. The zero test (§9.1) uses the same $\Gamma$, since the step's set now contains the PSD block.
+- **Tree.** $J_e$ comes from the step's dense Newton matrix at its last iterate (`edge_response_sdp`), the same construction as §11.1. Its PSD term pins directions that leave the null space of $X$ and keeps the curvature term that lets a low-rank moment matrix rotate.
+- **Cost.** One $n \times n$ Cholesky per solved edge per IPM iteration instead of §8.1's arrow inverse and a few-row Cholesky, so a solved edge costs more; the zero test with compaction (§9) solves only the edges that can move. Whether the rounds saved pay for it is measured, not assumed: A vs `A_split` and D vs `D_split` on the same task.
+- **Checks.** M3 compares `edge_sdp` with Clarabel's PSD triangle cone on sampled edges (objective, feasibility including PSD, the apex). M6's finite-difference check of $J_e$ compares faces including the moment matrix's rank.
+
 ### 8.3 κ ≥ 2: split the equalities too (deviation, §19)
 - For κ ≥ 2 the polyhedral block is still too large for a dense IPM on each edge, even after elimination (§5.1.7): 1,820 variables and up to 546 equality rows on a contact edge at κ = 2.
 - So dualize the equality rows as well (edge-local duals). The primal step for $m_e$ then becomes a **box projection** (bounds plus $0 \le m_0 \le 1$), which is exact and trivial.
@@ -460,7 +469,9 @@ M1 prints the resulting sizes per group of edge types. They set the size of the 
 
 ## 9. Exact skipping (`run_trajopt.py`, section SKIPPING) — proposal §4
 
-**Not built yet (M5).** Every edge runs its IPM every round, and the `skipping` settings default to off. A run that asks for any of them stops with an error, so it can't silently run something else under that name.
+**Built (M5): the zero test and bucketed compaction, on by default.** Not built: the face cache (§9.2) and the Gershgorin skip; a run that asks for them stops with an error. The face cache is exact only for polyhedral steps, so it cannot serve §8.4's SDP step; it remains for B and for the split mode.
+- **Refresh, as built.** The plan's pricing LP is not needed for exactness: when the test fails, the step runs, and its multipliers become the stored ones. A step that ends at the apex then certifies $f$ with a positive margin whenever $f$ is interior to the dual cone, so the test keeps passing while prices drift less than that margin. A pricing solve would give the largest margin; add it only if the skip counts show frequent refreshes.
+- **Split mode.** The step's set has no PSD block there ($\Lambda$ enters $f$ instead), so its zero test uses no $\Gamma$: a PSD multiplier certifies the smaller cone and could skip a step that is not zero.
 
 ### 9.1 Zero test (exact, any convex block; default on in all runs)
 - Polyhedral block step data: $g_e = c_e + K_e^\top p + \mathcal B_e^*(\Lambda_e) - T_e^{-1} m_e$. The step is zero **iff** $\pi_e(g_e) = g_{e,0} + \min_{m \in P_e \cap \{m_0 = 1\}} g_{e,\setminus0}^\top m \ge 0$. This is Theorem 1 of the edge-solve report.
@@ -500,7 +511,7 @@ $$
 
 ## 10. Certificate (`run_trajopt.py`, section CERTIFICATE) — proposal §5
 
-### 10.1 Free bound, every round (`free_every`, default 1, as proposal §4 step (d) and §5 specify)
+### 10.1 Free bound, every `free_every` rounds (default 10; the proposal's every round is `free_every: 1`)
 - Compute the bound inside the `lax.scan` round and keep the running maximum $L_{\text{best}} = \max_{\text{rounds}} L$. Any prices give a valid bound, so the maximum is valid.
 - State prices $\lambda$: the state rows of $p$, with flow rows set to zero.
 - For each edge: $g^{\text{cert}}_e = c_e + K_e^\top(0, \lambda)$, with **no** center term and **no** $\Lambda$ term.
@@ -975,15 +986,18 @@ solver:
   qp_block: auto            # exact_ipm for kappa=1, split_rows for kappa>=2
   psd_proj: auto            # auto | eigh | lowrank | polar_ns (8.2); only auto and eigh are wired so far
   psd_lowrank: {p: 8, tol: 1.0e-6, exact_check_every: 50}   # basis size, residual for the fallback, rounds between exact-error logs (8.2)
-  ipm: {iters: 40, tol: 1.0e-11}
+  psd_coupling: edge        # edge | split (8.4)
+  ipm: {iters: 40, min_iters: 10, tol: 1.0e-11}
+  ipm_sdp: {iters: 60, min_iters: 15, tol: 1.0e-10}   # 8.4
   restarts: {scheme: pdlp_kkt, beta_sufficient: 0.2, beta_necessary: 0.8, beta_artificial: 0.36}
   checkpoint_every: 2000
-skipping:                   # M5 turns on zero_test, gershgorin_skip and compaction: bucketed; until then a run that asks for them stops with an error
-  zero_test: false
+skipping:                   # 9: zero_test and compaction are built; face_cache and gershgorin_skip stop with an error
+  zero_test: true
   lb_tol: 1.0e-12
   face_cache: false         # true for B
   gershgorin_skip: false
-  compaction: none          # none | bucketed  (15.5: measure both)
+  compaction: bucketed      # none | bucketed  (15.5: measure both)
+  buckets: [64, 128, 256, 512, 1024, 2048]
 tree:
   type: exact               # none | exact | lowrank_a | lowrank_b
   every: 10
@@ -1013,7 +1027,7 @@ tree:
     ipm_tol: 1.0e-8
     hpe: {sigma: 0.9, lambda_min: 0.1}
 certificate:
-  free_every: 1             # rounds
+  free_every: 10            # rounds; must divide a scan block
   exact_every: 200
   full_exact_every: 1000
   lazy: true
@@ -1066,7 +1080,7 @@ Seed 0 only.
 | M2 | Reference solve | `--selftest`, in seconds: each solver's PSD convention passes a known-answer test, and every assembled program holds the hand push at cost $J_{\text{hand}}$, with a dropped step flagged. `--run ref_tiny --reference`, once: Clarabel solves $P_\delta$ on the tiny T1 instance and saves $J_{\text{rel}}$ (§10.4), with $J_{\text{rel}} \le J_{\text{hand}}$. `--survey`, optional and not part of acceptance: the tightness table and the numeric cross-checks. |
 | M3 | PDHG, run D | On the small instance, a stop of §10.5 fires, with $L$ valid and within 15 % of $J_{\text{rel}}$. Every logged $L$ is ≤ $J_{\text{rel}}$ (+ eps). Restarts fire and reduce the KKT error. Also: the operators' adjoints and step-scaled norm; the batched edge QP against Clarabel (objective within 1e-8, feasibility within 1e-9, $x$ within 1e-4, since a gap tolerance of 1e-10 pins $x$ only to about its square root); the GPU arrays hold the hand push; the free bound stays below $J_{\text{hand}}$ and $J_{\text{rel}}$ for random prices and multipliers; the bound's allowance covers terms of 1e8 that cancel. **A loose stop can't show that $L$ converges to $J_{\text{rel}}$ rather than below it.** One long run with a tighter stop shows that, once the rounds are fast enough; on the first run $L$ was 7.4 % below and rising at round 19,400. |
 | M4 | Edge identities | §9.1 tests pass (LB equals the pricing value at optimal duals; random duals give a valid bound; "zero ⇔ π ≥ 0" on 1,000 edges). Face cache output matches the IPM to 1e-10. The free bound with projected PSD duals never exceeds Clarabel's $\pi_e$ on 1,000 random edges and prices. |
-| M5 | Skipping | A vs A-noskip on the small instance: iterates agree to 1e-9 at every logged round (tolerance is the IPM's, not exact). Counts are logged. Bucketed compaction gives the same iterates as `compaction: none`. The frozen-edge PSD skip (§9.1) gives the same iterates as running every projection. |
+| M5 | Skipping | Bucketed compaction gives the same iterates as `compaction: none` (the verification mode) to 1e-8 at every 50th round. Every edge the zero test settles has optimal step value ≥ −1e-9·(1 + \|f\|) by a tight IPM and by Clarabel. Not "A vs A-noskip to 1e-9": at a zero step an IPM's iterate sits about n·μ/π from zero (π the edge's pricing margin), up to 1e-7 at tol 1e-10, so that comparison measures the IPM, not the skip. Counts are logged. The frozen-edge PSD skip (§9.1) is not built. |
 | M6 | Exact tree and safeguard | Cyclic reduction equals a dense solve (1e-10) on random systems, and solves the instance's own $S$ to a residual of 1e-10. The edge response matches finite differences of the edge prox (same active set): median relative error ≤ 1e-2, 90th percentile ≤ 0.1, since an IPM pins a narrow coordinate only to about the square root of its tolerance. A zero residual gives exactly zero correction. A fallback equals the plain PDHG step to rounding. A round is firmly nonexpansive in the metric on random pairs of states: this is the property behind the Fejér check on K2 steps, and it needs no saved solution. A trial whose edge steps failed is never kept. On a frozen-face linear test problem, one tree step with a tiny `tree.reg` reduces the row residual by ≥ 100×. A tree solve on the small instance reaches a stop with $L$ valid and within 15 % of $J_{\text{rel}}$. *Later:* the frozen-rank option and HPE, which this milestone does not build. |
 | M7 | Compressed engine | Merge identity $(R+VV^\top)/m = R/m + XC^{-1}X^\top$ checked densely. Without truncation it equals the uncompressed solve. With truncation, the tree map (applied to unit vectors) is symmetric positive definite. Zero right-hand side gives exactly zero; at a PDHG fixed point $r = 0$ gives $\Delta p = 0$. The Kronecker reference Schur complement matches a dense computation. |
 | M8 | C-a, C-b | Both converge (the safeguard holds). C-b: `assert` that $L$ is written only by §10. Trial pairs are clean (same centers; checked by recomputing one pair at fixed center). The positive SR1 fit reproduces stored pairs when the rank allows. The C-a base and correction are PSD. All Section 12 counters and timers are present, and the activation counter works on a hand case. |
@@ -1096,7 +1110,7 @@ Seed 0 only.
 
 ## 19. Deviations from the proposal (explicit)
 
-0. **SDP edges are split** (approved default 1). The PSD blocks get edge-local copies and duals, so each edge's prox step runs over its polyhedral block with the PSD duals fixed, instead of over the whole outer set. It is PDHG on an equivalent saddle problem with the same optimum. The zero test applies to the polyhedral block; PSD copies skip `eigh` by the exact Gershgorin test.
+0. **SDP edges: PSD inside the edge step at κ = 1 (§8.4, `psd_coupling: edge`, the default since the first tree runs); split as an option.** The proposal's form: each edge's prox step runs over its whole outer set, PSD block included, as a small SDP. The earlier default (approved default 1, kept as `psd_coupling: split`) gave the PSD blocks edge-local copies and duals, so the step ran over the polyhedral block with the PSD duals fixed; it is PDHG on an equivalent saddle problem with the same optimum, but on the tiny instance its PSD coupling held most of the residual, out of the tree's reach. In the split mode the zero test applies to the polyhedral block. At κ ≥ 2 the dense SDP step is too large (§8.3), so the split form stays the plan there.
 1. **κ ≥ 2 polyhedral block:** equality and inequality rows are dualized (`split_rows`) instead of solved as an exact edge QP. The dense per-edge QP would have thousands of variables. Skipping then applies to the PSD blocks through the Gershgorin test, not to a QP solve.
 2. **Run B costs:** tangent-plane underestimators of the quadratic costs ($\hat\ell_e \le \ell_e$, allowed by proposal §2) keep the edges polyhedral, so the face cache is exact. `cost_model: soc` restores the exact perspective costs, with the cache disabled.
 3. **Safeguard:** SuperMann as in proposal §4, with its blind K0 step disabled by default ($c_0 = 0$) so every tree step is checked against actual edge updates, as 12.4 requires. HPE is the alternative, also from §4.

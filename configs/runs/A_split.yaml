@@ -1,0 +1,5 @@
+# Run A with the PSD constraint split out of the edge steps (copies S, duals Lam), the coupling before
+# plan 8.4. Every other setting is the current one (skipping, free_every, IPM rules), so the pair A vs
+# A_split isolates the coupling. It does not reproduce runs made with the older code.
+run_name: A_split
+solver: {psd_coupling: split}

@@ -434,6 +434,7 @@ M1 prints the resulting sizes per group of edge types. They set the size of the 
   - `qdwh` (`jax.scipy.linalg.polar`): exact, but its internal QR runs matrix by matrix: 0.9 s per round at 136, about 20 s per call at 816. **Not used.**
   - `jacobi`, a batched parallel-cyclic Jacobi in plain JAX: batched across matrices, but every one of its n − 1 rotation steps per sweep rewrites all matrices to GPU memory, so it is memory-bound (~1 % of the roofline, 0.34 s per warm sweep). **Not used**; a fast version would need a custom kernel that keeps each matrix on chip.
   - **`lowrank` (the chosen method):** track the positive eigenspace from the previous round's basis by block-Krylov Rayleigh–Ritz on span$[Q, XQ]$, at O(n²p) per matrix instead of O(n³). Moment matrices approach low rank as the relaxation converges. It uses only matrix products and eigendecompositions of at most 2p × 2p (≤ 32, where cuSOLVER batches). Its orthonormalization comes from the small Gram matrix, because QR above 32 columns also runs matrix by matrix; the first version used QR and inherited the loop (96 ms). It reports its own residual $\|Xv - \theta v\| / \|X\|_F$ over the positive Ritz pairs. A failed check sends that matrix alone to the fallback (compaction, §9.3). `--bench_psd` measures it against exact `eigh` at the order-1, -2 and -3 sizes.
+  - **Known gap, to close before it is wired in:** Ritz residuals only test eigenvectors the basis already holds, so they can't see positive eigenvalues outside it. For $X = \mathrm{diag}(2, 1, -1, -2)$ and a basis on coordinates 1 and 4, it returns $\mathrm{diag}(2, 0, 0, 0)$ with zero residual. The solver doesn't use it yet: `solver.psd_proj` values other than `auto` and `eigh` stop with an error, so A-lowrank can't run until this is done.
   - Even a perfectly batched full eigendecomposition costs about 60 GFLOP per κ = 2 round (≥ 3 ms at peak), so the seconds target at κ = 2 relies on warm starts and low rank, not on batching alone. At κ = 3 the floor is memory traffic: reading and writing 816×816 matrices costs tens of ms per round at 2,600 edges, before linear elimination shrinks them (§5.1.7).
   - **M0 result (`--bench_psd`), projection time per round at 2,600 edges, on synthetic near-low-rank matrices with a warm basis:**
 
@@ -458,6 +459,8 @@ M1 prints the resulting sizes per group of edge types. They set the size of the 
 ---
 
 ## 9. Exact skipping (`run_trajopt.py`, section SKIPPING) — proposal §4
+
+**Not built yet (M5).** Every edge runs its IPM every round, and the `skipping` settings default to off. A run that asks for any of them stops with an error, so it can't silently run something else under that name.
 
 ### 9.1 Zero test (exact, any convex block; default on in all runs)
 - Polyhedral block step data: $g_e = c_e + K_e^\top p + \mathcal B_e^*(\Lambda_e) - T_e^{-1} m_e$. The step is zero **iff** $\pi_e(g_e) = g_{e,0} + \min_{m \in P_e \cap \{m_0 = 1\}} g_{e,\setminus0}^\top m \ge 0$. This is Theorem 1 of the edge-solve report.
@@ -506,14 +509,14 @@ $$
 \mathrm{LB}_e = g_0 + b_{\text{eq}}^\top\nu + b_{\text{in}}^\top\mu - \langle \hat\Lambda, \mathcal B_0\rangle + \sum_i \min(r_i\underline m_i, r_i \overline m_i),\quad r = g_{\setminus0} - A_{\text{eq}}^\top\nu - A_{\text{in}}^\top\mu - \mathcal B^*_{\setminus0}(\hat\Lambda),
 $$
   with $\hat\Lambda = \Pi_{\succeq0}(-\Lambda_e)$ under the §7.2 convention. Reason: for $\Gamma\succeq0$ and $\mathcal B(m)\succeq0$, $\langle\Gamma,\mathcal B(m)\rangle\ge0$, so $g^\top m \ge (g - \mathcal B^*\Gamma)^\top m$. Every multiplier is projected onto its dual cone, so the bound is valid for **any** stored values. Unit test: it never exceeds Clarabel's $\pi_e$.
-  - **Implementation:** $\hat\Lambda$ is the negative part of the matrix the PSD step just decomposed, divided by its step: with $X = S + T_S\Lambda$, $\hat\Lambda = (\Pi_{\succeq0}(X) - X)/T_S$. It is PSD by construction and tends to $-\Lambda$ at convergence, and it needs no second eigendecomposition per round.
+  - **Implementation:** $\hat\Lambda$ is the negative part of the matrix the PSD step just decomposed, divided by its step: with $X = S + T_S\Lambda = V\mathrm{diag}(w)V^\top$, $\hat\Lambda = V\mathrm{diag}(\max(-w, 0))V^\top/T_S$. It tends to $-\Lambda$ at convergence, and it needs no second eigendecomposition per round. Building it from the negative eigenvalues alone, not as $(\Pi_{\succeq0}(X) - X)/T_S$, keeps it PSD to rounding relative to its own size, whatever the size of the positive part.
 - Then $L = \mathrm{SP}[\mathrm{LB}_e] - \delta\sum_v \|\lambda_v\|_1$ (ℓ∞ tolerance, so the dual norm is ℓ1). This is $L_\delta$ of the tex.
 - **Also keep $L_0 = \mathrm{SP}[\mathrm{LB}_e]$**, the same shortest path without the δ term (tex Thm 5.1, Remark 5.2). $L_\delta \le J_{P_\delta}$, and it is the bound of the stopping test (§10.5). $L_0 \le J^\star$ and $L_0 \ge L_\delta$, so it is the bound reported for $J^\star$ and, once LEAP exists, for the trajectory gap $U_{\text{traj}} - L_0$. Both come from one shortest path; keep the running maximum of each.
 - **Shortest path:** a DP over layers with `jax.ops.segment_min` over incoming edges. That is O(E) work with $N$ sequential steps. A min-plus `associative_scan` gives $\log N$ depth, but is optional.
 
 ### 10.2 Exact bound and lazy evaluation (`exact_every`, default 200 rounds)
 - Exact $\pi_e$: solve each edge's pricing problem over its full outer set, including PSD blocks, at $g^{\text{cert}}_e$. Use CPU Clarabel or SCS in a process pool (`cert_workers`, default 32), or a batched GPU first-order solver if implemented.
-- **Soundness:** never use the solver's objective value. Plug its duals into the LB formula above, after projecting them onto their cones. Floating point gets a signed slack: add `-eps_cert * (1 + |terms|)` per edge, with `eps_cert` = 1e-12.
+- **Soundness:** never use the solver's objective value. Plug its duals into the LB formula above, after projecting them onto their cones. Floating point gets a signed slack (tex Prop. signed error): subtract `eps_cert` (1e-12) times $1 + a_0 + \sum_i a_i\max(|\underline m_i|, |\overline m_i|) + \|\Gamma\|_F\,\mathrm{tr}$ per edge, where $a_i = |c_i| + (|K|^\top|\lambda|)_i + (|R|^\top|u|)_i + (\mathcal B^*|\Gamma|)_i$ and tr bounds the trace of $\mathcal B(m)$ at $y = 1$. These are the sizes of the terms **before they cancel**, since cancellation is where roundoff hides: with terms of size 1e8 cancelling on a cost of 1e-4, the sum rounds to 1.00002e-4, and an allowance read from $r$ alone misses that. Rounding only exceeds the floor of 1e-12 at sizes around 4,500, so this matters mostly for large prices. The same slack covers the sum along a path, and a bound that isn't finite becomes $-\infty$, which is valid.
 - **Lazy SP:** start from the free LB values. Repeat: find the shortest path; evaluate every not-yet-evaluated edge on it exactly; stop when the path consists only of evaluated edges. Log the number of evaluations.
 - Log both the full exact $L$ (all edges; only every `full_exact_every` = 1,000 rounds, for diagnostics) and the lazy one.
 
@@ -525,7 +528,7 @@ $$
 ### 10.4 Ceiling diagnostic
 On small instances only: solve the full relaxation $P_\delta$ on the CPU to get $J_{\text{rel}}$. Check $L \le J_{\text{rel}}$ at every logged round.
 - **Why it exists.** The solver reports a lower and an upper bound and stops when they meet, but a bug in code they share could make both agree on a wrong value. Only a separate solver catches that. One value on one small instance is enough.
-- **Run once.** `push_model.py --run ref_tiny --reference` solves order 1 on the tiny T1 instance and saves `reference.json`, with a hash of the config it depends on. M3 loads that file. It is rerun only when the model changes, so it stays out of `--selftest`.
+- **Run once.** `push_model.py --run ref_tiny --reference` solves order 1 on the tiny T1 instance and saves `reference.json`, with a hash of the config it depends on, and the solution itself as `reference_state.npz`. M3 loads the first. `extract_render.py --reference` draws the second, which has no PDHG error in it, so it separates relaxation error from solver error. It is rerun only when the model changes, so it stays out of `--selftest`.
 - **Optional survey.** `push_model.py --survey` compares the relaxations on the tiny instance (order 1, B with bands and with McCormick, on T1 and T3), and at N = 4 cross-checks the reduced and full forms and runs order 2. Nothing depends on it.
 - The rows are already in conic form, so the data goes straight to the solvers, without CVXPY. Each solver's PSD triangle convention is tested on a problem with a known answer.
 - Clarabel runs its multithreaded `faer` factorization with `build.workers` threads, split evenly when solves run at once. Giving each of 8 parallel solves every core risks oversubscribing the machine.
@@ -580,13 +583,13 @@ All tree types (exact, C-a, C-b) share §11.1 and §11.6. They differ only in th
 $$J_e^{\text{full}} = H^{-1} - H^{-1}E_e^\top\,(E_e H^{-1}E_e^\top)^{+}\,E_e H^{-1}.$$
 - **How it is computed: from the edge step's last IPM iterate, not by this formula.** The frozen rows can number about 100, and `eigh` above 32×32 runs matrix by matrix (M0: 45 µs each at 136, so up to 100 ms per pass), which fails §0. The derivative of the barrier solution with respect to the linear term is
 $$J_e = \tilde H^{-1} - \tilde H^{-1}R^\top(R\tilde H^{-1}R^\top + W)^{-1}R\tilde H^{-1},$$
-  where $\tilde H$ is the arrow matrix of §8.1 and $W = \mathrm{diag}(s_g/z_g)$. Its inverse is closed form, so the only factorization is a Cholesky of the few rows after elimination, with a relative shift of 1e-12 because frozen rows can be redundant. As the barrier goes to zero this tends to the formula above: an active bound's weight $z/s$ grows without limit, an inactive bound's goes to zero, an active row's $W$ goes to zero, an inactive row's grows, and at the apex both bounds of every entry are active, so $J_e \to 0$ (tex: zero-flow edges are invisible). No threshold decides what is active.
+  where $\tilde H$ is the arrow matrix of §8.1 and $W = \mathrm{diag}(s_g/z_g)$. Its inverse is closed form, so the only factorization is a Cholesky of the few rows after elimination. **The rows are scaled to a unit diagonal first**, then shifted by 1e-12 because frozen rows can be redundant. An inactive row's $W$ grows without limit as the IPM converges, so a shift set by the largest diagonal, as in the first version, swamps the active rows and gets worse with convergence: 33 % response error at μ = 1e-11 and 98 % at 1e-13 in a two-variable test, against 1e-12 after scaling. As the barrier goes to zero this tends to the formula above: an active bound's weight $z/s$ grows without limit, an inactive bound's goes to zero, an active row's $W$ goes to zero, an inactive row's grows, and at the apex both bounds of every entry are active, so $J_e \to 0$ (tex: zero-flow edges are invisible). No threshold decides what is active.
 - $S$ receives $K_e J_e^{\text{full}} K_e^\top$ on the edge's coupled coordinates ($2q-1$ of them; flow is shared).
 - Batch over edges in buckets. **Count each $J_e$ as one derivative evaluation.**
 
 **Exact assembly.**
 - Scatter the edge blocks into the diagonal blocks $D_k$ and off-diagonal blocks $E_k$ ($w\times w$).
-- Add `tree.reg` · (mean unconstrained response) · I, default 1e-6 (§11.2).
+- Add `tree.reg` · $\Sigma_p^{-1}$ on the solved rows, default 1e-3 (§11.2).
 
 **Right-hand side** (proposal §12.4: "the uncompressed chosen model's residual on the right").
 - Compute it from the **actual** edge outputs $m^+$ of the current ordinary round, never from a compressed or reference model:
@@ -599,7 +602,7 @@ $$r = \Sigma_p^{-1}\,(\hat p - p),\qquad \hat p = \mathrm{prox}_{\sigma g^*}\!\b
 - Current point: $z = (m, S, p, \Lambda)$. The tree solves $\tilde S\,\Delta p = r$ for the vertex prices. The direction is $d = (0, 0, \Delta p, 0)$.
 - The edges' response to the new prices is obtained by the **actual edge updates** inside the check (§11.6): $T(z + \tau d)$ re-solves the edges, with exact skipping, at the same prox center $m$ and prices $p + \tau\Delta p$.
 - Using the same form for all tree types keeps the comparison fair. It also means each trial evaluation and the ordinary round $T(z)$ share the same centers, so their difference is a clean measurement of the edges' response to a price change. C-b uses this measurement as data (§11.5).
-- The direction is capped at `safeguard.d_max` (1e6) times $\|R(z)\|_P$ (tex Algorithm 1), and a tree pass also evaluates the free bound at each trial's prices, which is valid whether or not the trial is kept.
+- The direction is capped at `safeguard.d_max` (1e3) times $\|R(z)\|_P$ (tex Algorithm 1), and a tree pass also evaluates the free bound at each trial's prices, which is valid whether or not the trial is kept.
 - Optional flag `tree.primal_predict: true` (exact tree and C-a only): also move the center to $m^+ - J^{\text{full}}K^\top\Delta p$. Default false.
 
 ### 11.2 Exact tree (runs A, A-κ, A-reg, B): odd–even block cyclic reduction
@@ -612,7 +615,9 @@ $$r = \Sigma_p^{-1}\,(\hat p - p),\qquad \hat p = \mathrm{prox}_{\sigma g^*}\!\b
   - Back-substitute the odd layers on the way down.
   - The Cholesky factors of $D_{\text{odd}}$ are computed once per level and reused in both passes.
 - Pad $N$ to a power of two with identity blocks. Depth $2\lceil\log_2 N\rceil$.
-- **Solve twice** (`tree.filter`, default true): $\Delta p = (S+\epsilon)^{-1}S(S+\epsilon)^{-1}r$. Rows are exactly redundant at contact vertices, and the flow rows have a constant null direction, so $S$ is singular. A plain solve multiplies any inconsistency in $r$ by up to $1/\epsilon$. The filter's factor on an eigenvalue $\lambda$ is $\lambda/(\lambda+\epsilon)^2$: $1/\lambda$ where it matters and 0 on an exact null direction. Its largest value is $1/(4\epsilon)$, at $\lambda = \epsilon$, which is why `tree.reg` is 1e-6 and not the first plan's 1e-8. The map stays symmetric positive semidefinite and zero at $r = 0$, at the cost of one extra up-down pass.
+- **Solve twice** (`tree.filter`, default true): $\Delta p = (S+\epsilon)^{-1}S(S+\epsilon)^{-1}r$. Rows are exactly redundant at contact vertices, and the flow rows have a constant null direction, so $S$ is singular. A plain solve multiplies any inconsistency in $r$ by up to $1/\epsilon$. The filter's factor on an eigenvalue $\lambda$ is $\lambda/(\lambda+\epsilon)^2$: $1/\lambda$ where it matters and 0 on an exact null direction. The map stays symmetric positive semidefinite and zero at $r = 0$, at the cost of one extra up-down pass.
+- **Step size:** $\epsilon = $ `tree.reg` $\cdot\,\Sigma_p^{-1}$, per row. In the dual metric the filter's gain is at most $1/(4\epsilon)$, so one pass moves prices at most $1/(4\,$`reg`$)$ ordinary dual steps: 250 at 1e-3. A frozen face only predicts small changes. A shift of 1e-6 times the mean diagonal let the first run propose prices far outside that range, where the edge steps failed. A larger `reg` also damps the slowest modes, which are what the tree is for, so it is a knob to tune against the logged step sizes.
+- **Later, a speed-up only:** at the first level the diagonal blocks are block diagonal by vertex (20 × 28×28 at $w = 560$), so that level's Cholesky costs about 400× less arithmetic and its triangular solves about 20× less. From the M0 bench this saves at most about 36 % of a factorization, since the matrix products remain and later levels are dense.
 - **Cost** $O(Nw^3)$:
   - A, $w = 560$: milliseconds;
   - B, $w = 160\cdot6 = 960$;
@@ -741,7 +746,8 @@ $$P = \begin{bmatrix}T^{-1} & -K^\top\\ -K & \Sigma^{-1}\end{bmatrix}.$$
 - $R(z) = z - T(z)$. $T(z)$ is already computed by the ordinary round, so $R(z)$ and the fallback step are free.
 - All norms and inner products are in $P$; they cost a few $K$ matvecs.
 
-**Default: SuperMann (Themelis & Patrinos 2019), with the blind step disabled.** Parameters $c_1 = 0.99$, $q = 0.99$, $\sigma = 0.1$, relaxation $\lambda = 1$, backtracking $\beta = 0.5$, `max_trials` = 3.
+**Default: SuperMann (Themelis & Patrinos 2019), with the blind step disabled.** Parameters $c_1 = 0.99$, $q = 0.99$, $\sigma = 0.1$, relaxation $\lambda = 1$, backtracking $\beta = 0.1$ (so $\tau$ = 1, 0.1, 0.01), `max_trials` = 3, `d_max` = 1e3.
+- **Exact rounds only.** Both tests rest on $T$ being the exact, firmly nonexpansive round. With an inexact $T$, a K2 step can move as far as $\tau\|d\|_P$ in a meaningless direction. So a trial whose IPM residual is above `safeguard.ipm_tol` (1e-8) can't be kept, whatever its numbers say, and a failed $T(z)$ ends the pass. The first tree run had no such check: edge steps failed at huge prices, K2 kept the result, and the KKT error reached 1e17.
 - The K0 step (accept $z+d$ without evaluating it, when $\|R(z)\|\le c_0\eta$) is off by default ($c_0 = 0$), because 12.4 requires checking the actual update. `c0 > 0` enables it.
 - **Per attempt, with $\tau = 1$:**
   1. $w = z + \tau d$. Evaluate $T(w)$ (one round of edge work, with skipping). Set $R_w = w - T(w)$.
@@ -782,7 +788,8 @@ $$P = \begin{bmatrix}T^{-1} & -K^\top\\ -K & \Sigma^{-1}\end{bmatrix}.$$
 4. **Screening (§7 of the proposal)** needs $U$ from a feasible trajectory, so it is **off** until LEAP exists. Implement `screen_edges(U)` anyway, with a unit test using a synthetic $U$; it is used later.
 5. **Mode refinement** (proposal §7) is **off** in this phase. Leave a `TODO` hook only.
 
-### 12.2 Logging (`log.jsonl`, one line per scan block)
+### 12.2 Logging (`log.jsonl`, one line per scan block; `tree.jsonl`, one line per tree pass)
+- `tree.jsonl`: outcome, $\|R(z)\|_P$, the step length over it before the cap, the largest price change, the IPM residual and iterations of $T(z)$, edges with a failed response, and $\tau$, the residual ratio and the IPM residual of each try.
 - round, wall time, time per phase (edges, eigh, duals, tree, certificate);
 - primal and dual residuals, normalized KKT error, objective;
 - $L_{\text{free}}$, and when available $L_{\text{lazy}}$, $L_{\text{full}}$, $L_{\text{bnb}}$, each as both $L_\delta$ and $L_0$ (§10.1);
@@ -799,7 +806,7 @@ All unit tests from §5.4, §9.1, §9.2, §11.2, §11.3, §11.6 and §17 run on 
 
 ## 13. Extraction and rendering (`extract_render.py`) — proposal §6
 
-**Built so far:** all four methods, `--methods`, a guess file per path, and a video of each method's best paths (`--videos`, default 1). `--hand` sends the scripted true push through the same steps and checks the result against the true model's points, so a wrong video can be told apart from a wrong solve. The metrics table and the filmstrip come at M10.
+**Built so far:** all four methods, `--methods`, a guess file per path, and a video of each method's best paths (`--videos`, default 1). Each guess prints its true-model errors per group of rows, how many contact steps move the slider against the force or with none, how many non-contact steps move it, how many steps move it with the pusher away from it, and the largest gap on a contact step; the guess file holds these and the gap per knot. `--hand` sends the scripted true push through the same steps and checks the result against the true model's points, so a wrong video can be told apart from a wrong solve. Those numbers must read zero on it and must fire on a copy with a reversed step. `--reference` does the same extraction on Clarabel's solution, which has no PDHG error in it, except for the certificate's paths, which need prices. The metrics table and the filmstrip come at M10.
 
 ### 13.1 Input
 A run directory (final state, or a chosen snapshot), plus `--methods all|<list>`.
@@ -828,7 +835,7 @@ A run directory (final state, or a chosen snapshot), plus `--methods all|<list>`
   - the slider box at pose $(p, \theta)$, the goal box dashed, and a trail of the box center;
   - the pusher disk at $p + R(\theta) r$;
   - a contact force arrow at the contact point (world frame);
-  - text (Pillow, since the renderer draws none): method, step, mode name, cost so far.
+  - text (Pillow, since the renderer draws none): method, step, mode name, the pusher's gap to the slider, cost so far.
 - Per run, `extract/filmstrip.png`: 4 rows (methods) × 8 columns (evenly spaced knots), plus a final column overlaying all poses.
 - Several guesses can run one after another or as separate processes; each process needs its own EGL context, so a fork after one is opened is not safe.
 
@@ -908,6 +915,7 @@ At this problem size, a round is likely dominated by fixed per-kernel launch cos
   - If the profile shows the conditional costs a sync, compare against `compaction: none` (fixed shape, all edges under a mask). At E ≈ 2,600 the masked version may be faster. The skip counts (§9.4) are the skipping metric either way.
 - **Fewer, larger kernels.**
   - The free certificate's shortest path over N layers can use a min-plus `associative_scan` (log N depth) instead of N sequential steps. Measure both.
+  - Converged edges stop moving but stay in the IPM's batch, and every solve starts from the box midpoint. Dropping converged edges mid-solve, and warm starts, are candidates to profile alongside skipping.
   - Check whether your XLA version supports command buffers (CUDA graphs) for loop bodies, and whether they are on by default (`--xla_gpu_enable_command_buffer`). If they help, enable them for every run, so all runs get the same treatment.
 - **Instance batching** (stage 2 and later, throughput option). `vmap` the whole round over several tasks that share a trellis, so each kernel launch does more work. Wall-clock comparisons still come from single-instance timing mode.
 
@@ -965,21 +973,21 @@ solver:
   compile: {aot: true, cache_dir: ~/.cache/trellis_jax, fail_on_late_compile: true}
   dtype: float64
   qp_block: auto            # exact_ipm for kappa=1, split_rows for kappa>=2
-  psd_proj: auto            # auto | eigh | lowrank | polar_ns (8.2)
+  psd_proj: auto            # auto | eigh | lowrank | polar_ns (8.2); only auto and eigh are wired so far
   psd_lowrank: {p: 8, tol: 1.0e-6, exact_check_every: 50}   # basis size, residual for the fallback, rounds between exact-error logs (8.2)
   ipm: {iters: 40, tol: 1.0e-11}
   restarts: {scheme: pdlp_kkt, beta_sufficient: 0.2, beta_necessary: 0.8, beta_artificial: 0.36}
   checkpoint_every: 2000
-skipping:
-  zero_test: true
+skipping:                   # M5 turns on zero_test, gershgorin_skip and compaction: bucketed; until then a run that asks for them stops with an error
+  zero_test: false
   lb_tol: 1.0e-12
   face_cache: false         # true for B
-  gershgorin_skip: true
-  compaction: bucketed      # none | bucketed  (15.5: measure both)
+  gershgorin_skip: false
+  compaction: none          # none | bucketed  (15.5: measure both)
 tree:
   type: exact               # none | exact | lowrank_a | lowrank_b
   every: 10
-  reg: 1.0e-6
+  reg: 1.0e-3               # times each row's dual metric 1 / sigma (11.2)
   floor: 1.0e-4            # a row responding under this fraction of its unconstrained response stays put (11.1)
   filter: true              # solve twice, so that redundant rows cannot blow up the step (11.2)
   rank: 16
@@ -999,9 +1007,10 @@ tree:
     q: 0.99
     sigma: 0.1
     relax: 1.0
-    beta: 0.5
+    beta: 0.1
     max_trials: 3
-    d_max: 1.0e+6
+    d_max: 1.0e+3
+    ipm_tol: 1.0e-8
     hpe: {sigma: 0.9, lambda_min: 0.1}
 certificate:
   free_every: 1             # rounds
@@ -1055,10 +1064,10 @@ Seed 0 only.
 | M0 | Model and graph | Sign conventions unit-tested. Mode graph matches §4.4. Pruning removes only infeasible or unreachable edges. A hand-scripted feasible push (forward-simulated with the true model) is a valid start→goal path; record its cost $J_{\text{hand}}$. Benchmarks recorded: batched `eigh` sizes (§8.2), per-round time vs E, kernels and syncs per round (§15.5). Ahead-of-time compile covers every variant; a timing-mode dry run reports zero late compiles. *(The per-round measurements and the dry run need the PDHG round, so they are recorded at M3; M0 records the `eigh` benchmark.)* **Batching (§0):** every round primitive is timed at two batch sizes against its roofline, with a verdict. `--bench_psd` covers the PSD projection per round at orders 1–3: exact `eigh` against the low-rank tracker, with accuracy checked against an exact projection. `--bench_linalg` covers Cholesky and triangular solves at the IPM and tree sizes, the merge `eigh` and orthonormalization of the low-rank tree, and the coupling scatter/gather. Every primitive a milestone uses must be judged batched before that milestone starts. |
 | M1 | Outer models | §5.4 validity: 0 violations over $10^4$ samples per edge type (SDP κ = 1, 2; A-reg; Taylor with bands, McCormick and SOC costs), and $200$ per edge type at κ = 3. Negative controls flag broken samples, and lifted rows reproduce their polynomials at random points. Coupled coordinates agree and costs sum to $J_{\text{hand}}$ along the hand push. Every true step has an allowed region copy. Linear elimination (§5.1.7) leaves the model unchanged, checked algebraically at κ = 1 and on sampled types at κ = 2: same cost, coupling, equalities, PSD blocks and box, and at κ = 1 the same dimension with every full inequality implied. Band report and sizing table printed, and the per-group size table of §5.1.7 printed. |
 | M2 | Reference solve | `--selftest`, in seconds: each solver's PSD convention passes a known-answer test, and every assembled program holds the hand push at cost $J_{\text{hand}}$, with a dropped step flagged. `--run ref_tiny --reference`, once: Clarabel solves $P_\delta$ on the tiny T1 instance and saves $J_{\text{rel}}$ (§10.4), with $J_{\text{rel}} \le J_{\text{hand}}$. `--survey`, optional and not part of acceptance: the tightness table and the numeric cross-checks. |
-| M3 | PDHG, run D | On the small instance, a stop of §10.5 fires, with $L$ valid and within 15 % of $J_{\text{rel}}$. Every logged $L$ is ≤ $J_{\text{rel}}$ (+ eps). Restarts fire and reduce the KKT error. Also: the operators' adjoints and step-scaled norm; the batched edge QP against Clarabel (objective within 1e-8, feasibility within 1e-9, $x$ within 1e-4, since a gap tolerance of 1e-10 pins $x$ only to about its square root); the GPU arrays hold the hand push; the free bound stays below $J_{\text{hand}}$ and $J_{\text{rel}}$ for random prices and multipliers. **A loose stop can't show that $L$ converges to $J_{\text{rel}}$ rather than below it.** One long run with a tighter stop shows that, once the rounds are fast enough; on the first run $L$ was 7.4 % below and rising at round 19,400. |
+| M3 | PDHG, run D | On the small instance, a stop of §10.5 fires, with $L$ valid and within 15 % of $J_{\text{rel}}$. Every logged $L$ is ≤ $J_{\text{rel}}$ (+ eps). Restarts fire and reduce the KKT error. Also: the operators' adjoints and step-scaled norm; the batched edge QP against Clarabel (objective within 1e-8, feasibility within 1e-9, $x$ within 1e-4, since a gap tolerance of 1e-10 pins $x$ only to about its square root); the GPU arrays hold the hand push; the free bound stays below $J_{\text{hand}}$ and $J_{\text{rel}}$ for random prices and multipliers; the bound's allowance covers terms of 1e8 that cancel. **A loose stop can't show that $L$ converges to $J_{\text{rel}}$ rather than below it.** One long run with a tighter stop shows that, once the rounds are fast enough; on the first run $L$ was 7.4 % below and rising at round 19,400. |
 | M4 | Edge identities | §9.1 tests pass (LB equals the pricing value at optimal duals; random duals give a valid bound; "zero ⇔ π ≥ 0" on 1,000 edges). Face cache output matches the IPM to 1e-10. The free bound with projected PSD duals never exceeds Clarabel's $\pi_e$ on 1,000 random edges and prices. |
 | M5 | Skipping | A vs A-noskip on the small instance: iterates agree to 1e-9 at every logged round (tolerance is the IPM's, not exact). Counts are logged. Bucketed compaction gives the same iterates as `compaction: none`. The frozen-edge PSD skip (§9.1) gives the same iterates as running every projection. |
-| M6 | Exact tree and safeguard | Cyclic reduction equals a dense solve (1e-10) on random systems, and solves the instance's own $S$ to a residual of 1e-10. The edge response matches finite differences of the edge prox (same active set): median relative error ≤ 1e-2, 90th percentile ≤ 0.1, since an IPM pins a narrow coordinate only to about the square root of its tolerance. A zero residual gives exactly zero correction. A fallback equals the plain PDHG step to rounding. A round is firmly nonexpansive in the metric on random pairs of states: this is the property behind the Fejér check on K2 steps, and it needs no saved solution. On a frozen-face linear test problem, one tree step reduces the row residual by ≥ 100×. A tree solve on the small instance reaches a stop with $L$ valid and within 15 % of $J_{\text{rel}}$. *Later:* the frozen-rank option and HPE, which this milestone does not build. |
+| M6 | Exact tree and safeguard | Cyclic reduction equals a dense solve (1e-10) on random systems, and solves the instance's own $S$ to a residual of 1e-10. The edge response matches finite differences of the edge prox (same active set): median relative error ≤ 1e-2, 90th percentile ≤ 0.1, since an IPM pins a narrow coordinate only to about the square root of its tolerance. A zero residual gives exactly zero correction. A fallback equals the plain PDHG step to rounding. A round is firmly nonexpansive in the metric on random pairs of states: this is the property behind the Fejér check on K2 steps, and it needs no saved solution. A trial whose edge steps failed is never kept. On a frozen-face linear test problem, one tree step with a tiny `tree.reg` reduces the row residual by ≥ 100×. A tree solve on the small instance reaches a stop with $L$ valid and within 15 % of $J_{\text{rel}}$. *Later:* the frozen-rank option and HPE, which this milestone does not build. |
 | M7 | Compressed engine | Merge identity $(R+VV^\top)/m = R/m + XC^{-1}X^\top$ checked densely. Without truncation it equals the uncompressed solve. With truncation, the tree map (applied to unit vectors) is symmetric positive definite. Zero right-hand side gives exactly zero; at a PDHG fixed point $r = 0$ gives $\Delta p = 0$. The Kronecker reference Schur complement matches a dense computation. |
 | M8 | C-a, C-b | Both converge (the safeguard holds). C-b: `assert` that $L$ is written only by §10. Trial pairs are clean (same centers; checked by recomputing one pair at fixed center). The positive SR1 fit reproduces stored pairs when the rank allows. The C-a base and correction are PSD. All Section 12 counters and timers are present, and the activation counter works on a hand case. |
 | M9 | Certificate | Lazy $L$ equals full-exact $L$ (to 1e-9) whenever both are computed. B&B never lowers $L$. Signed slack is applied. |

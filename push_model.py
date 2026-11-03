@@ -5,7 +5,7 @@ Math: docs/trajopt_detailed.tex (source of truth). Implementation: IMPLEMENTATIO
     python push_model.py --selftest                  # milestone checks implemented so far (M0, M1, M2's fast part)
     python push_model.py --run A --build             # build, prune, validate and save one run's edge models
     python push_model.py --run B --band_report       # the Taylor band widths and the region sizing table
-    python push_model.py --run ref_tiny --reference  # the whole relaxation on the CPU: the J_rel that M3 checks against
+    python push_model.py --run ref_tiny --reference  # the whole relaxation on the CPU: the J_rel that M3 checks against, and the solution extract_render.py --reference draws
     python push_model.py --survey                    # optional: how tight each relaxation is on the tiny instance
 """
 import argparse
@@ -2124,7 +2124,17 @@ def reference_fingerprint(cfg):
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def reference_job(cfg, inst, label, threads=1):
+def save_reference_state(path, cfg, prob, x):
+    """The conic solver's solution as m per alive edge, padded like final_state.npz, so that extract_render.py --reference can draw the relaxation's own answer with no PDHG error in it."""
+    sizes = np.diff(prob["offs"])
+    m = np.zeros((prob["alive"].size, int(sizes.max())))
+    for i, (a, b) in enumerate(zip(prob["offs"][:-1], prob["offs"][1:])):
+        m[i, :b - a] = x[a:b]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, m=m, alive=prob["alive"], J=float(prob["c"] @ x), fingerprint=reference_fingerprint(cfg))
+
+
+def reference_job(cfg, inst, label, threads=1, state_path=None):
     """P_delta of one instance on the CPU (plan 10.4), as a JSON-ready dict. It prints a line when done, since jobs overlap and can take minutes, and it reports an error instead of raising, so that one failure does not hide the other solves."""
     md, modes, task, tr = inst
     try:
@@ -2138,6 +2148,8 @@ def reference_job(cfg, inst, label, threads=1):
             out["eq"], out["ge"], out["psd"] = conic_residuals(prob, x)
             out["J"] = float(prob["c"] @ x)
             out["flow_edges"] = int(np.sum(x[prob["offs"][:-1]] > 1e-4))
+            if state_path is not None and out["solved"]:
+                save_reference_state(state_path, cfg, prob, x)
     except Exception as exc:
         out = dict(label=label, task=task["name"], error=f"{type(exc).__name__}: {exc}", solved=False, infeasible=False, J=None)
     print(reference_line(out), flush=True)
@@ -3056,9 +3068,9 @@ def main():
         md, modes, task, tr = build_instance(cfg)
         build_relaxations(cfg, md, modes, task, tr)     # stops on a validity failure
         inst = (md, modes, task, tr)
-        result = reference_job(cfg, inst, cfg["run_name"], cpu_budget(cfg["build"]))
-        result.update(fingerprint=reference_fingerprint(cfg), J_hand=hand_cost(cfg, inst))
         path = ROOT / cfg["output"]["root"] / cfg["run_name"] / task["name"] / str(cfg["seed"]) / "reference.json"
+        result = reference_job(cfg, inst, cfg["run_name"], cpu_budget(cfg["build"]), state_path=path.with_name("reference_state.npz"))
+        result.update(fingerprint=reference_fingerprint(cfg), J_hand=hand_cost(cfg, inst))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(result, indent=2))
         print(f"saved {path}")

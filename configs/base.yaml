@@ -74,7 +74,7 @@ solver:
   compile: {aot: true, cache_dir: ~/.cache/trellis_jax, fail_on_late_compile: true}
   dtype: float64
   qp_block: auto                 # exact_ipm for kappa=1, split_rows for kappa>=2
-  psd_proj: auto                 # auto | eigh | lowrank | polar_ns: eigh at kappa 1, lowrank (polar_ns fallback) above (8.2)
+  psd_proj: auto                 # auto | eigh | lowrank | polar_ns: eigh at kappa 1, lowrank (polar_ns fallback) above (8.2). Only auto and eigh are wired so far: anything else stops with an error
   psd_lowrank: {p: 8, tol: 1.0e-6, exact_check_every: 50}   # basis size, residual that sends a matrix to the fallback, rounds between exact-error logs (kappa 1)
   # Edge QP (8.1). iters caps the iterations. adaptive stops once every edge has converged, at the
   # cost of reading one flag per iteration. cholesky: library | small (hand-written, for small sizes).
@@ -83,17 +83,18 @@ solver:
   restarts: {scheme: pdlp_kkt, beta_sufficient: 0.2, beta_necessary: 0.8, beta_artificial: 0.36}
   checkpoint_every: 2000
 
+# Not built until M5, which turns on zero_test, gershgorin_skip and compaction: bucketed. Until then a run that asks for any of these stops with an error.
 skipping:
-  zero_test: true
+  zero_test: false
   lb_tol: 1.0e-12
   face_cache: false              # true for B
-  gershgorin_skip: true
-  compaction: bucketed           # none | bucketed  (15.5: measure both)
+  gershgorin_skip: false
+  compaction: none               # none | bucketed  (15.5: measure both)
 
 tree:
   type: exact                    # none | exact | lowrank_a | lowrank_b
   every: 10
-  reg: 1.0e-6                    # added to the diagonal, times the mean unconstrained response (11.2)
+  reg: 1.0e-3                    # added to each row's diagonal, times its dual metric 1 / sigma: a pass moves prices at most about 1 / (4 reg) ordinary dual steps (11.2)
   floor: 1.0e-4                  # a row responding under this fraction of its unconstrained response stays put (11.1)
   filter: true                   # solve twice, so that redundant rows cannot blow up the step (11.2)
   rank: 16
@@ -113,9 +114,10 @@ tree:
     q: 0.99
     sigma: 0.1
     relax: 1.0
-    beta: 0.5
+    beta: 0.1                    # tries tau = 1, 0.1, 0.01: halving cannot correct a step that is orders of magnitude too long
     max_trials: 3
-    d_max: 1.0e+6                # a direction longer than this times the residual is scaled down (tex Algorithm 1)
+    d_max: 1.0e+3                # a direction longer than this times the residual is scaled down (tex Algorithm 1)
+    ipm_tol: 1.0e-8              # a round whose IPM residual is above this is not the exact round both tests need, so it can't be kept
     hpe: {sigma: 0.9, lambda_min: 0.1}
 
 certificate:

@@ -4,8 +4,9 @@
     python extract_render.py --run A                     # all four on the run's final_state.npz: a guess file per path, a video of each method's best
     python extract_render.py --run A --methods greedy,flow_decomp --videos 3
     python extract_render.py --run A --no_video          # guess files and the printed numbers only
+    python extract_render.py --run ref_tiny --reference  # the same on Clarabel's solution from push_model.py --reference, which has no PDHG error in it
 
-What it renders is a guess, not a true trajectory: first moments average all the flow through an edge, and nothing here enforces the true model (plan 13.3). The printed knot mismatch and rotation error say how far it is from one.
+What it renders is a guess, not a true trajectory: first moments average all the flow through an edge, and nothing here enforces the true model (plan 13.3). Each guess prints how far it is from one, and the video's label gives the mode and the pusher's gap on every frame.
 """
 import argparse
 import heapq
@@ -32,6 +33,12 @@ METHODS = dict(flow_decomp=("heaviest path", "flow"), random_round=("rounded pat
 SLIDER_HALF_HEIGHT = 0.02       # drawing only: the model is planar
 FLOW_FLOOR = 1e-12
 FLOW_LEFT = 1e-6                # path decomposition stops below this (plan 13.2)
+# The true-model numbers (plan 13.4). Each group covers the rows of the constraint table whose tags start so.
+ERROR_GROUPS = dict(translation=("trans_",), rotation=("rot_", "unit_norm"), torque=("torque",), friction=("fn_", "stick_", "slide_"), contact=("contact_", "head_region", "tail_region"),
+                    free_motion=("static_", "zero_"), speed=("v_max",), ends=("start_", "goal_"))
+MOVE_FLOOR = 1e-6               # m: a slider step below this counts as not moving
+FORCE_FLOOR = 1e-6              # N
+GAP_FLOOR = 1e-3                # m: a pusher further than this is not touching
 
 
 # ===== PROBLEM =====
@@ -62,6 +69,17 @@ def ensure_problem(cfg, run, task, sets):
     place = np.full(prob["edge_tail"].size, -1, np.int64)
     place[alive] = np.arange(alive.size)
     return dict(prob, s=int(prob["s"]), t=int(prob["t"]), N=int(prob["N"]), M=int(prob["M"]), alive=alive, place=place)
+
+
+def load_reference(cfg, prob, path):
+    """Clarabel's solution from push_model.py --reference, after checking that it belongs to this config and problem. It has no prices or edge bounds, so the certificate's paths are not available from it."""
+    if not path.exists():
+        raise SystemExit(f"no reference solution at {path}; run: python push_model.py --run {cfg['run_name']} --task {cfg['task']} --reference")
+    with np.load(path) as z:
+        solve = dict(m=z["m"], p=None, alive=z["alive"], lb=None, J=float(z["J"]), fingerprint=str(z["fingerprint"]))
+    if solve["fingerprint"] != pm.reference_fingerprint(cfg) or not np.array_equal(solve["alive"], prob["alive"]):
+        raise SystemExit(f"{path} came from another config; rerun: python push_model.py --run {cfg['run_name']} --task {cfg['task']} --reference")
+    return solve
 
 
 def load_solve(prob, path):
@@ -277,6 +295,42 @@ def mode_sequence(pairs):
     return ", ".join(f"{name} x{len(list(run))}" for name, run in itertools.groupby(tail["name"] for tail, _ in pairs))
 
 
+def pusher_gap(md, r):
+    """Clearance between the pusher disk and the slider at pusher centers r (n, 2) in the body frame: the signed distance to the box minus the radius, so 0 is touching and negative is overlapping."""
+    out = np.abs(r) - np.array([md["ax"], md["ay"]])
+    return np.linalg.norm(np.maximum(out, 0.0), axis=1) + np.minimum(np.max(out, axis=1), 0.0) - md["rp"]
+
+
+def true_model_numbers(md, task, prob, edges, pairs, knots, forces):
+    """How far a guess is from the true model (plan 13.4), at the points the video draws: the largest error per group of rows in the constraint table, how many contact steps move the slider against the force on it or with no force at all, how many non-contact steps move it, how many steps move it with the pusher away from it, and the pusher's gap at each knot."""
+    theta = np.arctan2(knots[:, 3], knots[:, 2])
+    gap = pusher_gap(md, knots[:, 4:6])
+    errors, contact_gap = {}, 0.0
+    counts = dict(contact_steps=0, free_steps=0, moved_contact=0, moved_free=0, against=0, unforced=0, moved_away=0)
+    for k, (e, (tail, head)) in enumerate(zip(edges, pairs)):
+        kind = pm.EDGE_KINDS[int(prob["type_kind"][prob["edge_type"][e]])]
+        point = pm.edge_vector(knots[k], knots[k + 1], *forces[k])
+        for tag, value in pm.violations(pm.edge_constraints(md, task, kind, tail, head), point).items():
+            group = next((name for name, starts in ERROR_GROUPS.items() if tag.startswith(starts)), "other")
+            errors[group] = max(errors.get(group, 0.0), float(value))
+        move = knots[k + 1, :2] - knots[k, :2]
+        moved = bool(np.linalg.norm(move) > MOVE_FLOOR)
+        counts["moved_away"] += int(moved and gap[k] > GAP_FLOOR)
+        if not tail["contact"]:
+            counts["free_steps"] += 1
+            counts["moved_free"] += int(moved)
+            continue
+        counts["contact_steps"] += 1
+        contact_gap = max(contact_gap, abs(float(gap[k])), abs(float(gap[k + 1])))
+        n, t = md["normals"][tail["face"]], md["tangents"][tail["face"]]
+        force = body_to_world(theta[k], -forces[k, 0] * n + forces[k, 1] * t)
+        if moved:
+            counts["moved_contact"] += 1
+            counts["unforced"] += int(np.linalg.norm(force) <= FORCE_FLOOR)
+            counts["against"] += int(np.linalg.norm(force) > FORCE_FLOOR and move @ force < 0.0)
+    return dict(counts, errors=errors, contact_gap=contact_gap, gap=gap)
+
+
 def hand_rows(cfg, prob, md, modes, task):
     """The scripted push (T1 only) as a flow of one on its edges and zero elsewhere. Only the entries extraction reads are filled. Returns (m over the alive edges, its edges, its true edge-layout points)."""
     steps = pm.hand_push(cfg, md, task, modes)
@@ -291,10 +345,18 @@ def hand_rows(cfg, prob, md, modes, task):
     return m, edges, np.array([s[3] for s in steps])
 
 
-def check_hand(path, weight, v, knots, costs, edges, truth, J_hand, tol=1e-9):
-    """Whether the steps above recover the scripted push: the independent truth is the true model's own points, not anything the relaxation stored."""
-    errors = dict(path=0.0 if path == edges else 1.0, flow=abs(weight - 1.0), points=float(np.max(np.abs(v - truth))),
-                  knots=float(np.max(np.abs(knots[:-1] - truth[:, list(pm.KNOT0)]))), cost=abs(float(costs.sum()) - J_hand))
+def check_hand(md, task, prob, path, weight, guess, edges, truth, J_hand, tol=1e-9):
+    """Whether the steps above recover the scripted push: the independent truth is the true model's own points, not anything the relaxation stored. The true-model numbers must read zero on it, and must fire on a copy with its last contact step reversed and the pusher moved 1 cm off the face."""
+    knots, forces, pairs, numbers = guess["knots"], guess["forces"], guess["pairs"], guess["numbers"]
+    errors = dict(path=0.0 if path == edges else 1.0, flow=abs(weight - 1.0), points=float(np.max(np.abs(guess["v"] - truth))),
+                  knots=float(np.max(np.abs(knots[:-1] - truth[:, list(pm.KNOT0)]))), cost=abs(float(guess["costs"].sum()) - J_hand), true_model=max(numbers["errors"].values()),
+                  against=float(numbers["against"] + numbers["unforced"]), free_motion=float(numbers["moved_free"]), moved_away=float(numbers["moved_away"]), contact_gap=numbers["contact_gap"])
+    k = max(i for i, (tail, _) in enumerate(pairs) if tail["contact"])
+    bad = knots.copy()
+    bad[k + 1, :2] = knots[k, :2] - (knots[k + 1, :2] - knots[k, :2])
+    bad[k, 4:6] = knots[k, 4:6] + 0.01 * md["normals"][pairs[k][0]["face"]]
+    flagged = true_model_numbers(md, task, prob, path, pairs, bad, forces)
+    errors["control"] = 0.0 if flagged["against"] >= 1 and flagged["moved_away"] >= 1 and flagged["errors"]["translation"] > 1e-6 and abs(flagged["contact_gap"] - 0.01) < 1e-9 else 1.0
     ok = all(value <= tol for value in errors.values())
     print(f"{'PASS' if ok else 'FAIL'}: hand push through extraction: " + ", ".join(f"{k} error {value:.1e}" for k, value in errors.items()), flush=True)
     return ok
@@ -431,7 +493,7 @@ def render_video(cfg, md, task, knots, forces, pairs, costs, title, path):
                 tip = at + float(rc["force_scale"]) * force
                 add_arrow(renderer.scene, mujoco, (at[0], at[1], 2.0 * hz + 0.004), (tip[0], tip[1], 2.0 * hz + 0.004), 0.006, (0.95, 0.6, 0.1, 1.0))
         where = f"step {k + 1}/{N}  {pairs[k][0]['name']}" if k < N else f"end, {N} steps"
-        writer.append_data(label(renderer.render(), [title, where, f"cost so far {costs[:k + 1].sum():.5f}"]))
+        writer.append_data(label(renderer.render(), [title, f"{where}  gap {pusher_gap(md, r[None])[0] * 100:.1f} cm", f"cost so far {costs[:k + 1].sum():.5f}"]))
 
     for k in range(N):
         for i in range(per_step):
@@ -444,20 +506,24 @@ def render_video(cfg, md, task, knots, forces, pairs, costs, title, path):
 
 
 def report_guess(cfg, prob, md, modes, task, out, name, title, weight_name, edges, weight, rows, video):
-    """One guess: its knots, forces and numbers, printed and saved as guess_<name>.npz (plan 13.3, 13.4), with its video if asked. Returns the pieces --hand checks."""
+    """One guess: its knots, forces and numbers, printed and saved as guess_<name>.npz (plan 13.3, 13.4), with its video if asked. Returns its pieces, which --hand checks."""
     check_path(prob, edges)
     v = edge_points(prob, edges, rows)
     knots, forces, mismatch = knots_and_forces(v)
     pairs = step_modes(prob, modes, edges)
     costs = step_costs(cfg, knots, forces, pairs)
+    numbers = true_model_numbers(md, task, prob, edges, pairs, knots, forces)
     norm_error = float(np.max(np.abs(knots[:, 2] ** 2 + knots[:, 3] ** 2 - 1.0)))
     print(f"{name}: {weight_name} {weight:.6f}, relaxed cost {relaxed_costs(prob, edges, rows).sum():.6f}, cost at the extracted points {costs.sum():.6f}, largest knot mismatch {np.max(mismatch, initial=0.0):.2e}, largest |c^2 + s^2 - 1| {norm_error:.2e}", flush=True)
     print(f"  modes: {mode_sequence(pairs)}", flush=True)
+    print("  true model, largest error: " + ", ".join(f"{group} {value:.1e}" for group, value in numbers["errors"].items()), flush=True)
+    print(f"  slider moves on {numbers['moved_contact']} of {numbers['contact_steps']} contact steps ({numbers['against']} against the force, {numbers['unforced']} with no force) and {numbers['moved_free']} of {numbers['free_steps']} non-contact steps; "
+          f"{numbers['moved_away']} steps move it with the pusher over {GAP_FLOOR * 1e3:.0f} mm away; largest gap on a contact step {numbers['contact_gap'] * 100:.2f} cm", flush=True)
     np.savez(out / f"guess_{name}.npz", modes=np.array([int(prob["type_tail"][prob["edge_type"][e]]) for e in edges]), edges=np.array(edges), knots=knots, forces=forces,
-             dt=md["dt"], task=cfg["task"], weight=weight, knot_mismatch=mismatch)
+             dt=md["dt"], task=cfg["task"], weight=weight, knot_mismatch=mismatch, gap=numbers["gap"], true_model=json.dumps({k: value for k, value in numbers.items() if k != "gap"}))
     if video:
         render_video(cfg, md, task, knots, forces, pairs, costs, title, out / f"{name}.mp4")
-    return v, knots, costs, pairs
+    return dict(v=v, knots=knots, forces=forces, costs=costs, pairs=pairs, numbers=numbers)
 
 
 # ===== MAIN =====
@@ -468,6 +534,7 @@ def main():
     ap.add_argument("--task", default=None, help="task name, overriding the config")
     ap.add_argument("--set", action="append", default=[], help="override one key, e.g. --set render.slow=1; keys the model depends on must match the solve")
     ap.add_argument("--hand", action="store_true", help="use the scripted true push (T1) instead of a solve, and check the extraction against it")
+    ap.add_argument("--reference", action="store_true", help="use Clarabel's solution from push_model.py --reference instead of a PDHG solve: no solver error, so what remains is the relaxation's")
     ap.add_argument("--methods", default="all", help=f"all, or a comma-separated list of {', '.join(METHODS)}")
     ap.add_argument("--videos", type=int, default=1, help="videos per method, best paths first; every path gets a guess file")
     ap.add_argument("--no_video", action="store_true", help="extract and print only")
@@ -488,22 +555,23 @@ def main():
         except ValueError as exc:
             raise SystemExit(f"--hand needs a task the script covers: {exc}")
         edges, weight = heaviest_path(prob, m[:, 0])
-        v, knots, costs, pairs = report_guess(cfg, prob, md, modes, task, out, "hand", "hand push", "path flow", edges, weight, m[prob["place"][edges]], not args.no_video)
-        J_hand = float(sum(pm.poly_eval(pm.edge_cost(cfg, tail, head), row) for row, (tail, head) in zip(truth, pairs)))
-        sys.exit(0 if check_hand(edges, weight, v, knots, costs, hand_edges, truth, J_hand) else 1)
-    solve = load_solve(prob, run_dir(cfg) / "final_state.npz")
+        guess = report_guess(cfg, prob, md, modes, task, out, "hand", "hand push", "path flow", edges, weight, m[prob["place"][edges]], not args.no_video)
+        J_hand = float(sum(pm.poly_eval(pm.edge_cost(cfg, tail, head), row) for row, (tail, head) in zip(truth, guess["pairs"])))
+        sys.exit(0 if check_hand(md, task, prob, edges, weight, guess, hand_edges, truth, J_hand) else 1)
+    solve = load_reference(cfg, prob, run_dir(cfg) / "reference_state.npz") if args.reference else load_solve(prob, run_dir(cfg) / "final_state.npz")
+    source, prefix = ("Clarabel", "reference_") if args.reference else (cfg["run_name"], "")
     methods = list(cfg["extraction"]["methods"]) if args.methods == "all" else args.methods.split(",")
     unknown = [method for method in methods if method not in METHODS]
     if unknown:
         raise SystemExit(f"unknown methods {unknown}; choose from {', '.join(METHODS)}")
-    print(f"{cfg['run_name']} on {cfg['task']}", flush=True)
+    print(f"{cfg['run_name']} on {cfg['task']}" + (f": Clarabel's solution of the relaxation, J_rel {solve['J']:.6f}" if args.reference else ""), flush=True)
     for method in methods:
         if method == "cert_kshortest" and solve["lb"] is None:
-            print(f"{method}: skipped, since this final_state.npz has no edge bounds; rerun the solve", flush=True)
+            print(f"{method}: skipped, since this solution has no edge bounds; a solve from the current run_trajopt.py saves them", flush=True)
             continue
         label, weight_name = METHODS[method]
         for rank, (edges, weight, rows) in enumerate(method_paths(cfg, prob, md, modes, task, solve, method)):
-            report_guess(cfg, prob, md, modes, task, out, f"{method}_{rank}", f"{cfg['run_name']}: {label} {rank}, {weight_name} {weight:.3f}", weight_name, edges, weight, rows, not args.no_video and rank < args.videos)
+            report_guess(cfg, prob, md, modes, task, out, f"{prefix}{method}_{rank}", f"{source}: {label} {rank}, {weight_name} {weight:.3f}", weight_name, edges, weight, rows, not args.no_video and rank < args.videos)
 
 
 if __name__ == "__main__":

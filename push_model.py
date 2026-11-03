@@ -2,14 +2,16 @@
 
 Math: docs/trajopt_detailed.tex (source of truth). Implementation: IMPLEMENTATION_PLAN.md.
 
-    python push_model.py --selftest                  # milestone checks implemented so far (M0, M1, M2)
+    python push_model.py --selftest                  # milestone checks implemented so far (M0, M1, M2's fast part)
     python push_model.py --run A --build             # build, prune, validate and save one run's edge models
     python push_model.py --run B --band_report       # the Taylor band widths and the region sizing table
-    python push_model.py --run A --reference         # the whole relaxation on the CPU, for J_rel
+    python push_model.py --run ref_tiny --reference  # the whole relaxation on the CPU: the J_rel that M3 checks against
+    python push_model.py --survey                    # optional: how tight each relaxation is on the tiny instance
 """
 import argparse
 import collections
 import copy
+import hashlib
 import itertools
 import json
 import math
@@ -90,13 +92,19 @@ def _pool_call(item):
     return _POOL_FN(item)
 
 
+def cpu_budget(build):
+    """The threads build-time work may use: build.workers, capped by the cores this process can run on."""
+    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    return max(1, min(int(build["workers"]), cores))
+
+
 def pool_map(fn, items, build):
     """[fn(x) for x in items] in forked workers, one item at a time because edge types differ in cost. With one worker, or no fork on this platform, it runs in-process and never forks."""
     global _POOL_FN
     items = list(items)
     if not items:
         return []
-    workers = min(int(build["workers"]), os.cpu_count() or 1)
+    workers = cpu_budget(build)
     if workers <= 1 or "fork" not in multiprocessing.get_all_start_methods():
         return [fn(x) for x in items]
     _POOL_FN = fn
@@ -1914,13 +1922,35 @@ def svec_to_matrix(v, size, solver):
     return out
 
 
-def type_conic_rows(rel, solver, pin_width):
-    """One edge type's rows over its own m: equalities (zero), nonnegative rows (nonneg) and the PSD blocks' scaled triangles (psd, with their sizes). An interval bound of at most pin_width becomes an equality, because two facing inequalities leave an interior-point solver no interior."""
+def fixed_by_equalities(Aeq):
+    """Which entries of m the equalities alone fix as a multiple of m_0: those whose row in a null-space basis is a multiple of m_0's row."""
+    n = Aeq.shape[1]
+    if Aeq.shape[0] == 0:
+        return np.zeros(n, bool)
+    d = Aeq.toarray()
+    d /= np.linalg.norm(d, axis=1, keepdims=True)
+    _, s, vt = np.linalg.svd(d)
+    z = vt[int(np.sum(s > 1e-10 * s[0])):].T
+    flow = z[0]
+    if flow @ flow < 1e-20:
+        return np.zeros(n, bool)
+    return np.linalg.norm(z - (z @ flow / (flow @ flow))[:, None] * flow, axis=1) <= 1e-10
+
+
+def type_conic_rows(rel, solver):
+    """One edge type's rows over its own m: equalities (zero), nonnegative rows (nonneg) and the PSD blocks' scaled triangles (psd, with their sizes).
+
+    Two facing inequalities around a fixed value leave an interior-point solver no interior, so an
+    entry the equalities already fix gets no bound rows (checked up to order 1 and run B, where this
+    is cheap), and an entry with a zero-width interval becomes an equality at that value. A narrow
+    interval that is still open stays two inequalities: tau^2 y^2 in [0, 1.8e-7] is small, not fixed.
+    """
     if rel["soc"]:
         raise NotImplementedError("the reference solve has no second-order rows; use cost_model tangent_planes")
     n, lo, hi = rel["n"], rel["lo"], rel["hi"]
-    entries = np.arange(1, n)
-    tight = hi[1:] - lo[1:] <= pin_width
+    fixed = fixed_by_equalities(rel["Aeq"]) if n <= 200 else np.zeros(n, bool)
+    entries = np.arange(1, n)[~fixed[1:]]
+    tight = lo[entries] == hi[entries]
     pinned, spread = entries[tight], entries[~tight]
 
     def bound_rows(j, a, b):
@@ -1929,7 +1959,7 @@ def type_conic_rows(rel, solver, pin_width):
         rows.eliminate_zeros()
         return rows
 
-    zero = sp.vstack([rel["Aeq"], bound_rows(pinned, 1.0, -0.5 * (lo[pinned] + hi[pinned]))], format="csr")
+    zero = sp.vstack([rel["Aeq"], bound_rows(pinned, 1.0, -lo[pinned])], format="csr")
     zero = zero[independent_rows(zero) if n <= 200 else unique_rows(zero)]
     flow = sp.csr_matrix(([1.0], ([0], [0])), shape=(1, n))
     nonneg = sp.vstack([rel["G"], bound_rows(spread, 1.0, -lo[spread]), bound_rows(spread, -1.0, hi[spread]), flow], format="csr")
@@ -1953,7 +1983,7 @@ def assemble_conic(cfg, tr, rels, solver):
     if not alive.size:
         raise ValueError("no start->goal path survives pruning")
     types = tr["edge_type"][alive]
-    rows_of = {int(ti): type_conic_rows(rels[ti], solver, float(cfg["reference"]["pin_width"])) for ti in np.unique(types)}
+    rows_of = {int(ti): type_conic_rows(rels[ti], solver) for ti in np.unique(types)}
     offs = np.concatenate([[0], np.cumsum([rels[ti]["n"] for ti in types])]).astype(np.int64)
     nx = int(offs[-1])
 
@@ -2019,8 +2049,8 @@ def conic_residuals(prob, x):
     return eq, ge, psd
 
 
-def solve_conic(cfg, prob):
-    """Solves an assembled program with its solver: a dict with status, solved, infeasible, iters, the dual value, seconds and x."""
+def solve_conic(cfg, prob, threads=1):
+    """Solves an assembled program with its solver, Clarabel's factorization on the given threads: a dict with status, solved, infeasible, iters, the dual value, seconds and x."""
     rc = cfg["reference"]
     nz, nl, sizes = prob["nz"], prob["nl"], [int(s) for s in prob["sizes"]]
     t0 = time.perf_counter()
@@ -2031,8 +2061,8 @@ def solve_conic(cfg, prob):
         settings.time_limit = float(rc["time_limit_s"])
         settings.max_iter = int(rc["clarabel"]["max_iter"])
         settings.tol_gap_abs = settings.tol_gap_rel = settings.tol_feas = float(rc["clarabel"]["tol"])
-        if rc["clarabel"]["direct_solve_method"]:
-            settings.direct_solve_method = str(rc["clarabel"]["direct_solve_method"])
+        settings.direct_solve_method = str(rc["clarabel"]["direct_solve_method"])
+        settings.max_threads = int(threads)
         cones = ([clarabel.ZeroConeT(nz)] if nz else []) + ([clarabel.NonnegativeConeT(nl)] if nl else []) + [clarabel.PSDTriangleConeT(s) for s in sizes]
         n = prob["A"].shape[1]
         sol = clarabel.DefaultSolver(sp.csc_matrix((n, n)), prob["c"], prob["A"], prob["b"], cones, settings).solve()
@@ -2074,19 +2104,35 @@ def reference_line(r):
         return f"  {r['label']:44s} ERROR {r['error']}"
     value = "infeasible" if r["J"] is None else f"{r['J']:.6f}"
     tail = "" if r["J"] is None else f"  residuals eq {r['eq']:.1e} ge {r['ge']:.1e} psd {r['psd']:.1e}  edges with flow {r['flow_edges']}/{r['edges']}"
-    return (f"  {r['label']:44s} J_rel {value:>10s}  dual {r['J_dual']:9.6f}  {r['solver']:8s} {r['status']:24s} {r['iters']:7d} its {r['seconds']:8.1f} s"
+    return (f"  {r['label']:44s} J_rel {value:>10s}  dual {r['J_dual']:9.6f}  {r['solver']:8s} {r['threads']:3d} threads  {r['status']:24s} {r['iters']:7d} its {r['seconds']:8.1f} s"
             f"  x {r['variables']:7d}  rows {r['rows']:7d}  block {r['largest_block']:4d}" + tail)
 
 
-def reference_job(cfg, inst, label):
+def hand_cost(cfg, inst):
+    """J_hand of an instance's scripted push, or None for a task the script does not cover."""
+    md, modes, task, _ = inst
+    try:
+        return float(sum(poly_eval(edge_cost(cfg, tail, head), v) for _, tail, head, v in hand_push(cfg, md, task, modes)))
+    except ValueError:
+        return None
+
+
+def reference_fingerprint(cfg):
+    """A hash of everything J_rel depends on in the config, so that M3 can tell whether a saved value still applies."""
+    payload = {k: cfg[k] for k in ("model", "trellis", "relaxation", "costs", "task", "tasks", "task_common")}
+    payload["delta"] = cfg["solver"]["delta"]
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def reference_job(cfg, inst, label, threads=1):
     """P_delta of one instance on the CPU (plan 10.4), as a JSON-ready dict. It prints a line when done, since jobs overlap and can take minutes, and it reports an error instead of raising, so that one failure does not hide the other solves."""
     md, modes, task, tr = inst
     try:
         rels = edge_models(cfg, md, task, modes, tr)
         prob = assemble_conic(cfg, tr, rels, reference_solver(cfg, rels))
-        out = solve_conic(cfg, prob)
+        out = solve_conic(cfg, prob, threads)
         x = out.pop("x")
-        out.update(label=label, task=task["name"], solver=prob["solver"], variables=int(prob["c"].size), rows=int(prob["A"].shape[0]),
+        out.update(label=label, task=task["name"], solver=prob["solver"], threads=int(threads), variables=int(prob["c"].size), rows=int(prob["A"].shape[0]),
                    edges=int(prob["alive"].size), largest_block=max(prob["sizes"], default=0), J=None)
         if not out["infeasible"]:
             out["eq"], out["ge"], out["psd"] = conic_residuals(prob, x)
@@ -2793,7 +2839,7 @@ def cone_convention_value(cfg, solver):
 def check_cone_conventions(cfg):
     """Each solver's PSD triangle convention, on a problem with a known answer."""
     solvers = ["clarabel", "scs"]
-    results = pool_map(lambda s: cone_convention_value(cfg, s), solvers, cfg["build"])
+    results = [cone_convention_value(cfg, s) for s in solvers]
     worst = max(abs(a - b) for a, b in results)
     return worst <= 1e-4, ", ".join(f"{s} {a:.6f}" for s, (a, _) in zip(solvers, results)) + f", exact {results[0][1]:.6f}"
 
@@ -2824,21 +2870,56 @@ def check_reference_assembly(cfg, inst, solver, record, key):
                 f"cost {J:.6f} vs J_hand {J_hand:.6f}; dropping a step breaks conservation by {eq_broken:.2f}")
 
 
-def selftest_m2(cfg):
-    """Milestone M2 (plan 10.4, 17): the reference solve on the small instance. J_rel stays under J_hand, the reduced and full forms agree, and the table shows how tight each relaxation is."""
-    st, m2 = cfg["selftest"], cfg["selftest"]["m2"]
-    t0 = time.perf_counter()
+REDUCED_FORM, FULL_FORM = "SDP order 1", "SDP order 1, full form"
+
+
+def small_models(cfg):
+    """The tiny instance's configs (plan 12.3) for the reference solve and its checks, with every relaxation choice spelled out: (order-1 config, {label: config})."""
+    st = cfg["selftest"]
     small = deep_merge(cfg, {"trellis": {"N": st["N"], "faces": st["faces"], "regions": st["regions"]},
                              "relaxation": {"type": "sdp", "order": 1, "eliminate_linear": True, "regions": {"theta_splits": 1, "lambda_splits": 1},
                                             "taylor_mode": "band", "cost_model": "tangent_planes"}})
     regioned = deep_merge(small, {"relaxation": {"regions": {"theta_splits": int(st["theta_splits"])}}})
-    reduced, full_form = "SDP order 1", "SDP order 1, full form"
-    models = {reduced: small, full_form: deep_merge(small, {"relaxation": {"eliminate_linear": False}}),
-              "Taylor bands": deep_merge(regioned, {"relaxation": {"type": "taylor"}}),
-              "Taylor McCormick": deep_merge(regioned, {"relaxation": {"type": "taylor", "taylor_mode": "mccormick"}})}
+    return small, {REDUCED_FORM: small, FULL_FORM: deep_merge(small, {"relaxation": {"eliminate_linear": False}}),
+                   "Taylor bands": deep_merge(regioned, {"relaxation": {"type": "taylor"}}),
+                   "Taylor McCormick": deep_merge(regioned, {"relaxation": {"type": "taylor", "taylor_mode": "mccormick"}})}
+
+
+def selftest_m2(cfg):
+    """Milestone M2's fast part (plan 10.4, 17): each solver's PSD convention, and every assembled program holds the hand push. The reference solve itself runs once through --reference, and the comparison of relaxations through --survey."""
+    st, m2 = cfg["selftest"], cfg["selftest"]["m2"]
+    t0 = time.perf_counter()
+    small, models = small_models(cfg)
+    plain = build_instance(deep_merge(small, {"task": st["task"]}))
+    split = build_instance(deep_merge(models["Taylor bands"], {"task": st["task"]}))
+    order_two = deep_merge(small, {"task": m2["order2"]["task"], "trellis": {"N": int(m2["order2"]["N"])}, "relaxation": {"order": 2}})
+    order_two_inst = build_instance(order_two)
+    hand = {}
+    checks = [
+        ("M2 PSD triangle conventions, on a known answer", lambda: check_cone_conventions(small)),
+        ("M2 assembly holds the hand push, SDP order 1", lambda: check_reference_assembly(small, plain, "clarabel", hand, "order1")),
+        ("M2 assembly holds the hand push, SDP order 1, full form", lambda: check_reference_assembly(models[FULL_FORM], plain, "clarabel", hand, "full_form")),
+        ("M2 assembly holds the hand push, Taylor", lambda: check_reference_assembly(models["Taylor bands"], split, "clarabel", hand, "taylor")),
+        ("M2 assembly holds the hand push, Taylor McCormick", lambda: check_reference_assembly(models["Taylor McCormick"], split, "clarabel", hand, "mccormick")),
+        ("M2 assembly holds the hand push, SDP order 2", lambda: check_reference_assembly(order_two, order_two_inst, "scs", hand, "order2")),
+    ]
+    ok, checked = run_checks(checks)
+    out = ROOT / cfg["output"]["root"] / "selftest" / "m2.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(dict(ok=ok, results=checked, J_hand=hand), indent=2))
+    print(f"\n{'ALL M2 CHECKS PASSED' if ok else 'SOME M2 CHECKS FAILED'} in {time.perf_counter() - t0:.0f}s; details in {out}", flush=True)
+    print("The value M3 checks against comes from one solve: python push_model.py --run ref_tiny --reference", flush=True)
+    return ok
+
+
+def reference_survey(cfg):
+    """Optional, on the CPU: how tight each relaxation is on the tiny instance, and the numeric cross-checks of the reference solve (plan 10.4). Nothing depends on it. The solves share the CPU budget and print as they finish."""
+    st, m2 = cfg["selftest"], cfg["selftest"]["m2"]
+    t0 = time.perf_counter()
+    small, models = small_models(cfg)
     tasks = [str(t) for t in m2["tasks"]]
     plain = {t: build_instance(deep_merge(small, {"task": t})) for t in tasks}
-    split = {t: build_instance(deep_merge(regioned, {"task": t})) for t in tasks}
+    split = {t: build_instance(deep_merge(models["Taylor bands"], {"task": t})) for t in tasks}
 
     def instance(model, t):
         """The instance of one model and task; run B's edge types are pruned by its own rows, on a private copy."""
@@ -2851,90 +2932,60 @@ def selftest_m2(cfg):
         prune_outer(mcfg, md, modes, task, own)
         return md, modes, task, own
 
-    jobs = [(models[model], instance(model, t), f"{t}: {model}") for t in tasks for model in models]
-    short = deep_merge(small, {"task": m2["order2"]["task"], "trellis": {"N": int(m2["order2"]["N"])}, "reference": {"time_limit_s": float(m2["order2"]["time_limit_s"])}})
-    short_two = deep_merge(short, {"relaxation": {"order": 2}})
+    jobs = [(models[model], instance(model, t), f"{t}: {model}") for t in tasks for model in models if model != FULL_FORM]
+    o2 = m2["order2"]
+    short = deep_merge(small, {"task": o2["task"], "trellis": {"N": int(o2["N"])}})
     short_inst = build_instance(short)
-    prebuild_bases(short, *short_inst)
-    prebuild_bases(short_two, *short_inst)
-    short_labels = [f"{short['task']}, N = {short['trellis']['N']}: SDP order {k}" for k in (1, 2)]
-    print(f"built the M2 instances in {time.perf_counter() - t0:.1f}s; the solves print as they finish", flush=True)
-    results, hand = {}, {}
-
-    def run_jobs(batch):
-        for r in pool_map(lambda i: reference_job(*batch[i]), range(len(batch)), cfg["build"]):
-            results[r["label"]] = r
-
-    def solve_small():
-        run_jobs(jobs)
-        errors = [r["label"] for r in results.values() if "error" in r]
-        return not errors, f"{len(jobs)} solves" + (f"; errors on {errors}" if errors else "")
+    prefix = f"{short['task']}, N = {short['trellis']['N']}: "
+    order_two = "SDP order 2"
+    short_cfgs = {REDUCED_FORM: short, FULL_FORM: deep_merge(short, {"relaxation": {"eliminate_linear": False}}),
+                  order_two: deep_merge(short, {"relaxation": {"order": 2}, "reference": {"time_limit_s": float(o2["time_limit_s"])}})}
+    for name, c in short_cfgs.items():
+        prebuild_bases(c, *short_inst)
+        jobs.append((c, short_inst, prefix + name))
+    threads = max(1, cpu_budget(cfg["build"]) // len(jobs))
+    print(f"built the survey's instances in {time.perf_counter() - t0:.1f}s; {len(jobs)} solves at {threads} threads each, printing as they finish", flush=True)
+    results = {r["label"]: r for r in pool_map(lambda i: reference_job(*jobs[i], threads), range(len(jobs)), cfg["build"])}
+    J_full, J_short = hand_cost(small, plain[st["task"]]), hand_cost(short, short_inst)
 
     def below_hand():
         tol = float(m2["tol_hand"])
-        J_hand = hand[st["task"]]
         lines, ok = [], True
-        for model in models:
-            r = results[f"{st['task']}: {model}"]
+        pairs = [(f"{st['task']}: {model}", J_full) for model in models if model != FULL_FORM] + [(prefix + REDUCED_FORM, J_short), (prefix + FULL_FORM, J_short)]
+        for label, J_hand in pairs:
+            r = results[label]
             if r["solved"]:
                 ok &= r["J"] <= J_hand + tol
-            elif model != full_form:                # the full form has no interior, and may stop early: reported, not required
-                ok = False
-            lines.append(f"{model} {'not solved' if r['J'] is None else format(r['J'], '.6f')} ({r.get('status', 'error')})")
-        return ok, f"J_hand {J_hand:.6f}; " + ", ".join(lines)
-
-    def forms_agree():
-        tol = float(m2["tol_forms"])
-        lines, ok = [], True
-        for t in tasks:
-            a, b = results[f"{t}: {reduced}"], results[f"{t}: {full_form}"]
-            if a["infeasible"] or b["infeasible"]:
-                ok &= a["infeasible"] and b["infeasible"]
-                lines.append(f"{t}: {a.get('status')} and {b.get('status')}")
-                continue
-            ok &= a["solved"]
-            if a["J"] is None or b["J"] is None:
-                ok = False
-                lines.append(f"{t}: no value to compare")
-                continue
-            gap = abs(a["J"] - b["J"])
-            if b["solved"]:
-                ok &= gap <= tol * max(1.0, abs(a["J"]))
-            lines.append(f"{t}: reduced {a['J']:.8f} in {a['seconds']:.1f} s, full {b['J']:.8f} in {b['seconds']:.1f} s ({b['status']}), difference {gap:.1e}")
+            lines.append(f"{label} {'no value' if r['J'] is None else format(r['J'], '.6f')} vs {J_hand:.6f} ({r.get('status', 'error')})")
         return ok, "; ".join(lines)
 
-    def order_two():
-        run_jobs([(short, short_inst, short_labels[0]), (short_two, short_inst, short_labels[1])])
-        one, two = results[short_labels[0]], results[short_labels[1]]
-        J_hand = hand["order2"]
+    def forms_agree():
+        a, b = results[prefix + REDUCED_FORM], results[prefix + FULL_FORM]
+        if a["J"] is None or b["J"] is None:
+            return False, f"no value to compare: {a.get('status', a.get('error'))}, {b.get('status', b.get('error'))}"
+        gap = abs(a["J"] - b["J"])
+        ok = a["solved"] and (not b["solved"] or gap <= float(m2["tol_forms"]) * max(1.0, abs(a["J"])))
+        return ok, f"reduced {a['J']:.8f} in {a['seconds']:.1f} s, full {b['J']:.8f} in {b['seconds']:.1f} s ({b['status']}), difference {gap:.1e}"
+
+    def order_two_value():
+        one, two = results[prefix + REDUCED_FORM], results[prefix + order_two]
         if not one["solved"] or two["J"] is None:
             return False, f"order 1 {one.get('status', one.get('error'))}, order 2 {two.get('status', two.get('error'))}"
-        msg = f"J_hand {J_hand:.6f}; order 1 {one['J']:.6f}; order 2 {two['J']:.6f} ({two['solver']}, {two['status']}, {two['iters']} iterations, {two['seconds']:.0f} s)"
+        msg = f"J_hand {J_short:.6f}; order 1 {one['J']:.6f}; order 2 {two['J']:.6f} ({two['solver']}, {two['status']}, {two['iters']} iterations, {two['seconds']:.0f} s)"
         if not two["solved"]:
             return True, msg + "; order 2 did not converge inside the time limit, so its value is approximate and not checked"
         slack = 1e-3                                # SCS's accuracy
-        return one["J"] - slack <= two["J"] <= J_hand + slack, msg
+        return one["J"] - slack <= two["J"] <= J_short + slack, msg
 
-    checks = [
-        ("M2 PSD triangle conventions, on a known answer", lambda: check_cone_conventions(small)),
-        ("M2 assembly holds the hand push, SDP order 1", lambda: check_reference_assembly(small, plain[st["task"]], "clarabel", hand, st["task"])),
-        ("M2 assembly holds the hand push, SDP order 1, full form", lambda: check_reference_assembly(models[full_form], plain[st["task"]], "clarabel", {}, "full")),
-        ("M2 assembly holds the hand push, Taylor", lambda: check_reference_assembly(models["Taylor bands"], split[st["task"]], "clarabel", {}, "taylor")),
-        ("M2 assembly holds the hand push, Taylor McCormick", lambda: check_reference_assembly(models["Taylor McCormick"], split[st["task"]], "clarabel", {}, "mccormick")),
-        ("M2 assembly holds the hand push, SDP order 2", lambda: check_reference_assembly(short_two, short_inst, "scs", hand, "order2")),
-        ("M2 reference solves on the small instance", solve_small),
-        ("M2 J_rel <= J_hand", below_hand),
-        ("M2 the reduced and full forms give the same J_rel", forms_agree),
-        ("M2 SDP order 2 on a shorter horizon", order_two),
-    ]
-    ok, checked = run_checks(checks)
+    ok, checked = run_checks([("survey: J_rel <= J_hand", below_hand), ("survey: the reduced and full forms give the same J_rel", forms_agree),
+                              ("survey: SDP order 2 on a shorter horizon", order_two_value)])
     print(f"\nreference values, delta = {cfg['solver']['delta']}", flush=True)
     for r in results.values():
         print(reference_line(r), flush=True)
-    out = ROOT / cfg["output"]["root"] / "selftest" / "m2.json"
+    out = ROOT / cfg["output"]["root"] / "selftest" / "survey.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(dict(ok=ok, results=checked, solves=list(results.values()), J_hand=hand), indent=2))
-    print(f"\n{'ALL M2 CHECKS PASSED' if ok else 'SOME M2 CHECKS FAILED'} in {time.perf_counter() - t0:.0f}s; details in {out}", flush=True)
+    out.write_text(json.dumps(dict(ok=ok, results=checked, solves=list(results.values()), J_hand=dict(full=J_full, short=J_short)), indent=2))
+    print(f"\n{'SURVEY CHECKS PASSED' if ok else 'SOME SURVEY CHECKS FAILED'} in {time.perf_counter() - t0:.0f}s; details in {out}", flush=True)
     return ok
 
 
@@ -2988,25 +3039,34 @@ def main():
     ap.add_argument("--selftest", action="store_true", help="run the milestone checks")
     ap.add_argument("--build", action="store_true", help="build, prune, validate and save the edge models of the run")
     ap.add_argument("--band_report", action="store_true", help="print the Taylor bands and the region sizing table of the run")
-    ap.add_argument("--reference", action="store_true", help="solve the run's whole relaxation on the CPU for J_rel (small instances)")
+    ap.add_argument("--reference", action="store_true", help="solve the run's whole relaxation on the CPU for J_rel and save it (small instances)")
+    ap.add_argument("--survey", action="store_true", help="optional: how tight each relaxation is on the tiny instance, on the CPU")
     args = ap.parse_args()
     cfg = load_config(args.run, args.set)
     if args.task:
         cfg["task"] = args.task
     if args.selftest:
         sys.exit(0 if selftest(cfg) else 1)
+    if args.survey:
+        sys.exit(0 if reference_survey(cfg) else 1)
     if args.band_report:
         band_report(cfg, *build_instance(cfg))
         return
     if args.reference:
         md, modes, task, tr = build_instance(cfg)
         build_relaxations(cfg, md, modes, task, tr)     # stops on a validity failure
-        result = reference_job(cfg, (md, modes, task, tr), cfg["run_name"])
+        inst = (md, modes, task, tr)
+        result = reference_job(cfg, inst, cfg["run_name"], cpu_budget(cfg["build"]))
+        result.update(fingerprint=reference_fingerprint(cfg), J_hand=hand_cost(cfg, inst))
         path = ROOT / cfg["output"]["root"] / cfg["run_name"] / task["name"] / str(cfg["seed"]) / "reference.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(result, indent=2))
         print(f"saved {path}")
-        return
+        if result["J_hand"] is None:
+            sys.exit(0 if result["solved"] or result["infeasible"] else 1)
+        ok = result["solved"] and result["J"] <= result["J_hand"] + float(cfg["selftest"]["m2"]["tol_hand"])
+        print(f"{'PASS' if ok else 'FAIL'}: J_rel {result['J']} and J_hand {result['J_hand']:.6f}: J_rel must solve and stay at or below J_hand", flush=True)
+        sys.exit(0 if ok else 1)
     if args.build:
         md, modes, task, tr = build_instance(cfg)
         rels = build_relaxations(cfg, md, modes, task, tr)

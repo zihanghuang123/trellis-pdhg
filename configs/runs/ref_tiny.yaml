@@ -1,0 +1,6 @@
+# The reference solve M3 checks against: SDP order 1 on the tiny instance (plan 10.4). Run it once,
+# and again only when the model changes:
+#   python push_model.py --run ref_tiny --reference
+run_name: ref_tiny
+task: T1_push_straight
+trellis: {N: 8, faces: [0, 2], regions: [strip_0, strip_2, corner_1, corner_2]}

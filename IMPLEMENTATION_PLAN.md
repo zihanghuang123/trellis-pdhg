@@ -102,7 +102,7 @@ trellis-pdhg/                 # repo root; every script lives here
     runs/A.yaml  A_lowrank.yaml  A_k2.yaml  A_k3.yaml  A_reg.yaml  B.yaml
          C_a_r4.yaml C_a_r16.yaml C_a_r64.yaml
          C_b_r4.yaml C_b_r16.yaml C_b_r64.yaml C_b_r16_p4.yaml
-         D.yaml  A_noskip.yaml  ref_tiny_k2.yaml
+         D.yaml  A_noskip.yaml  ref_tiny.yaml  ref_tiny_k2.yaml
     matrix.yaml               # stage1 (8 jobs + tuning), stage2, stage3
   push_model.py               # §4–§6: geometry, modes, graph, relaxations, data arrays, reference CPU solve
   run_trajopt.py              # §7–§12: PDHG, edge solvers, skipping, certificate, trees, safeguard, main loop
@@ -519,8 +519,12 @@ $$
 - Replace the edge's value in the SP and recompute $L$. Log the improvement.
 
 ### 10.4 Ceiling diagnostic
-On small instances only: solve the full relaxation $P_\delta$ on the CPU to get $J_{\text{rel}}$ (`push_model.py --reference`). Check $L \le J_{\text{rel}}$ at every logged round.
+On small instances only: solve the full relaxation $P_\delta$ on the CPU to get $J_{\text{rel}}$. Check $L \le J_{\text{rel}}$ at every logged round.
+- **Why it exists.** The solver reports a lower and an upper bound and stops when they meet, but a bug in code they share could make both agree on a wrong value. Only a separate solver catches that. One value on one small instance is enough.
+- **Run once.** `push_model.py --run ref_tiny --reference` solves order 1 on the tiny T1 instance and saves `reference.json`, with a hash of the config it depends on. M3 loads that file. It is rerun only when the model changes, so it stays out of `--selftest`.
+- **Optional survey.** `push_model.py --survey` compares the relaxations on the tiny instance (order 1, B with bands and with McCormick, on T1 and T3), and at N = 4 cross-checks the reduced and full forms and runs order 2. Nothing depends on it.
 - The rows are already in conic form, so the data goes straight to the solvers, without CVXPY. Each solver's PSD triangle convention is tested on a problem with a known answer.
+- Clarabel runs its multithreaded `faer` factorization with `build.workers` threads, split evenly when solves run at once. Giving each of 8 parallel solves every core risks oversubscribing the machine.
 - Clarabel (interior point, accurate) forms a dense KKT block per PSD cone, so it fits small blocks only: κ = 1 and run B. Above `reference.clarabel_max_block` (32), SCS (first order, lower accuracy) takes over. A κ = 2 value therefore comes with its residuals, may stop at the time limit, and is reported but not used as a ceiling unless it converged.
 
 ### 10.5 Stopping test on P_δ (the η stop)
@@ -1006,6 +1010,7 @@ output: {root: runs}
 - C-b-r16-p4: as C-b-r16, plus `tree.probe_solves_per_refresh: 4`.
 - D: `tree.type: none`.
 - A-noskip (M5 check only, not a matrix job): `skipping.zero_test: false`, `skipping.compaction: none`.
+- ref_tiny (the reference solve M3 checks against, not a matrix job): order 1 on the tiny mode set at N = 8, task T1.
 - ref_tiny_k2 (optional CPU reference solve, not a matrix job): `relaxation.order: 2` on the tiny mode set at N = 8, task T3.
 
 **Matrix** (`matrix.yaml`):
@@ -1024,7 +1029,7 @@ Seed 0 only.
 |---|---|---|
 | M0 | Model and graph | Sign conventions unit-tested. Mode graph matches §4.4. Pruning removes only infeasible or unreachable edges. A hand-scripted feasible push (forward-simulated with the true model) is a valid start→goal path; record its cost $J_{\text{hand}}$. Benchmarks recorded: batched `eigh` sizes (§8.2), per-round time vs E, kernels and syncs per round (§15.5). Ahead-of-time compile covers every variant; a timing-mode dry run reports zero late compiles. *(The per-round measurements and the dry run need the PDHG round, so they are recorded at M3; M0 records the `eigh` benchmark.)* **Batching (§0):** every round primitive is timed at two batch sizes against its roofline, with a verdict. `--bench_psd` covers the PSD projection per round at orders 1–3: exact `eigh` against the low-rank tracker, with accuracy checked against an exact projection. `--bench_linalg` covers Cholesky and triangular solves at the IPM and tree sizes, the merge `eigh` and orthonormalization of the low-rank tree, and the coupling scatter/gather. Every primitive a milestone uses must be judged batched before that milestone starts. |
 | M1 | Outer models | §5.4 validity: 0 violations over $10^4$ samples per edge type (SDP κ = 1, 2; A-reg; Taylor with bands, McCormick and SOC costs), and $200$ per edge type at κ = 3. Negative controls flag broken samples, and lifted rows reproduce their polynomials at random points. Coupled coordinates agree and costs sum to $J_{\text{hand}}$ along the hand push. Every true step has an allowed region copy. Linear elimination (§5.1.7) leaves the model unchanged, checked algebraically at κ = 1 and on sampled types at κ = 2: same cost, coupling, equalities, PSD blocks and box, and at κ = 1 the same dimension with every full inequality implied. Band report and sizing table printed, and the per-group size table of §5.1.7 printed. |
-| M2 | Reference solve | Clarabel solves the full relaxation $P_\delta$ on the small instance and gives $J_{\text{rel}}$ (§10.4), for SDP κ = 1 in both forms and for B with bands and with McCormick, on T1 and T3. $J_{\text{rel}} \le J_{\text{hand}}$ on T1. The reduced and full forms agree. The assembled program holds the hand push at cost $J_{\text{hand}}$, and dropping a step is flagged. Each solver's PSD convention passes a known-answer test. SDP κ = 2 runs through SCS on a shorter horizon; its value is checked only if it converges. |
+| M2 | Reference solve | `--selftest`, in seconds: each solver's PSD convention passes a known-answer test, and every assembled program holds the hand push at cost $J_{\text{hand}}$, with a dropped step flagged. `--run ref_tiny --reference`, once: Clarabel solves $P_\delta$ on the tiny T1 instance and saves $J_{\text{rel}}$ (§10.4), with $J_{\text{rel}} \le J_{\text{hand}}$. `--survey`, optional and not part of acceptance: the tightness table and the numeric cross-checks. |
 | M3 | PDHG, run D | On the small instance, the objective reaches within 1e-4 relative of $J_{\text{rel}}$. Every logged $L$ is ≤ $J_{\text{rel}}$ (+ eps). Restarts fire and reduce the KKT error. Stopping test (§10.5): when it fires, $L_{\text{best}} \le J_{\text{rel}} \le U_{\text{flow}}$ within tolerance and the gap is ≤ η. |
 | M4 | Edge identities | §9.1 tests pass (LB equals the pricing value at optimal duals; random duals give a valid bound; "zero ⇔ π ≥ 0" on 1,000 edges). Face cache output matches the IPM to 1e-10. The free bound with projected PSD duals never exceeds Clarabel's $\pi_e$ on 1,000 random edges and prices. |
 | M5 | Skipping | A vs A-noskip on the small instance: iterates agree to 1e-9 at every logged round (tolerance is the IPM's, not exact). Counts are logged. Bucketed compaction gives the same iterates as `compaction: none`. The frozen-edge PSD skip (§9.1) gives the same iterates as running every projection. |
